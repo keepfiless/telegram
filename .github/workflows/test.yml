@@ -1,0 +1,334 @@
+name: 02- 📥 Telegram Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: '📢 Channel / group username or ID (e.g. @mychannel or -1001234567890)'
+        required: true
+        type: string
+      limit:
+        description: '🔢 Number of recent messages to scan for files (default: 50)'
+        required: false
+        default: '50'
+        type: string
+      file_types:
+        description: '📂 File types to download (comma-separated, e.g. mp4,pdf,zip — leave blank for ALL)'
+        required: false
+        default: ''
+        type: string
+      password:
+        description: '🔒 Password for zip files (optional)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  download-telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.maxRequestBuffer 100M
+          git config --global core.compression 0
+          git config --global pack.windowMemory 256m
+          git config --global pack.packSizeLimit 100m
+          git config --global pack.threads 1
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          echo "Git configured."
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-pip zip p7zip-full curl jq bc
+          pip3 install --upgrade telethon
+
+      - name: Download Telegram Files
+        env:
+          TG_API_ID:      ${{ secrets.TG_API_ID }}
+          TG_API_HASH:    ${{ secrets.TG_API_HASH }}
+          TG_SESSION:     ${{ secrets.TG_SESSION }}
+          TG_CHANNEL:     ${{ github.event.inputs.channel }}
+          TG_LIMIT:       ${{ github.event.inputs.limit }}
+          TG_FILE_TYPES:  ${{ github.event.inputs.file_types }}
+          ZIP_PASSWORD:   ${{ github.event.inputs.password }}
+        run: |
+          mkdir -p telegram_files
+
+          python3 << 'PYEOF'
+          import os, asyncio, re
+          from telethon import TelegramClient
+          from telethon.sessions import StringSession
+
+          api_id      = int(os.environ["TG_API_ID"])
+          api_hash    = os.environ["TG_API_HASH"]
+          session_str = os.environ["TG_SESSION"]
+          channel     = os.environ["TG_CHANNEL"]
+          limit       = int(os.environ.get("TG_LIMIT", "50"))
+          raw_types   = os.environ.get("TG_FILE_TYPES", "").strip()
+          allowed_ext = [e.strip().lower().lstrip(".") for e in raw_types.split(",") if e.strip()] if raw_types else []
+
+          OUTPUT_DIR  = "telegram_files"
+          SPLIT_MB    = 45
+          SPLIT_BYTES = SPLIT_MB * 1024 * 1024
+
+          def sanitize(name):
+              return re.sub(r'[\\/*?:"<>|]', '_', name).replace(' ', '-')
+
+          async def main():
+              async with TelegramClient(StringSession(session_str), api_id, api_hash) as client:
+                  print(f"Connected as: {(await client.get_me()).username}")
+                  print(f"Fetching up to {limit} messages from: {channel}")
+                  print(f"Filter by types: {allowed_ext if allowed_ext else 'ALL'}")
+
+                  downloaded = 0
+                  skipped    = 0
+
+                  async for msg in client.iter_messages(channel, limit=limit):
+                      if not msg.file:
+                          continue
+
+                      fname = msg.file.name or f"file_{msg.id}"
+                      ext   = (msg.file.ext or "").lstrip(".").lower()
+
+                      if allowed_ext and ext not in allowed_ext:
+                          skipped += 1
+                          continue
+
+                      safe_name = sanitize(fname)
+                      out_path  = os.path.join(OUTPUT_DIR, safe_name)
+
+                      # Avoid re-downloading the same file
+                      if os.path.exists(out_path):
+                          print(f"  [SKIP] Already exists: {safe_name}")
+                          continue
+
+                      size_mb = round(msg.file.size / 1024 / 1024, 2) if msg.file.size else "?"
+                      print(f"  [DL] {safe_name}  ({size_mb} MB) …")
+
+                      try:
+                          await msg.download_media(file=out_path)
+                          downloaded += 1
+                          print(f"       ✓ saved to {out_path}")
+                      except Exception as e:
+                          print(f"       ✗ failed: {e}")
+
+                  print(f"\nDone. Downloaded: {downloaded}  |  Skipped (type filter): {skipped}")
+
+          asyncio.run(main())
+          PYEOF
+
+      - name: Split large files & zip (optional password)
+        env:
+          ZIP_PASSWORD: ${{ github.event.inputs.password }}
+        run: |
+          SPLIT_MB=45
+          SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
+          ZIP_PASSWORD="${ZIP_PASSWORD}"
+
+          for FILE in telegram_files/*; do
+            [ -f "$FILE" ] || continue
+            SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+
+            if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
+              echo "Splitting large file: $FILE ($(( SIZE / 1024 / 1024 )) MB)"
+              BASE="${FILE%.*}"
+              EXT="${FILE##*.}"
+
+              if [ -n "$ZIP_PASSWORD" ]; then
+                7z a -v${SPLIT_MB}m -p"${ZIP_PASSWORD}" "${BASE}.zip" "$FILE"
+              else
+                7z a -v${SPLIT_MB}m "${BASE}.zip" "$FILE"
+              fi
+
+              rm "$FILE"
+              echo "  → Split into parts under ${BASE}.zip.*"
+
+            elif [ -n "$ZIP_PASSWORD" ]; then
+              BASE="${FILE%.*}"
+              echo "Password-protecting: $FILE"
+              7z a -p"${ZIP_PASSWORD}" "${BASE}.zip" "$FILE"
+              rm "$FILE"
+            fi
+          done
+
+      - name: Generate README for telegram_files/
+        run: |
+          README="telegram_files/README.md"
+          {
+            echo "# 📥 Telegram Downloads"
+            echo ""
+            echo "| # | File | Size |"
+            echo "|---|------|------|"
+            i=1
+            for F in telegram_files/*; do
+              [ -f "$F" ] || continue
+              NAME=$(basename "$F")
+              [ "$NAME" = "README.md" ] && continue
+              SIZE=$(du -sh "$F" 2>/dev/null | cut -f1)
+              echo "| $i | [$NAME](./$NAME) | $SIZE |"
+              i=$((i+1))
+            done
+            echo ""
+            echo "_Generated by [AVASAM Telegram Downloader](https://avasam.ir)_"
+          } > "$README"
+          echo "README generated."
+
+      - name: Push files to repository
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          BACKUP_DIR="/tmp/tg_backup_$$"
+          mkdir -p "$BACKUP_DIR"
+          cp -r telegram_files/* "$BACKUP_DIR/" 2>/dev/null || true
+
+          SPLIT_MB=45
+          SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
+
+          # ── helper: push a single file with retries ──────────────────────
+          push_single_file() {
+            local FILE="$1"
+            git fetch origin "$BRANCH" --quiet 2>/dev/null || true
+            git reset --hard origin/"$BRANCH" 2>/dev/null || true
+            mkdir -p telegram_files
+            cp -r "$BACKUP_DIR"/* telegram_files/ 2>/dev/null || true
+            git add "$FILE" 2>/dev/null || true
+            if ! git diff --cached --quiet 2>/dev/null; then
+              git commit -m "[AVASAM] Add $(basename "$FILE") [skip ci]" --quiet 2>/dev/null || true
+              local RETRY=0
+              while [ $RETRY -lt 5 ]; do
+                RETRY=$((RETRY+1))
+                if timeout 180 git push origin HEAD:"$BRANCH" 2>&1; then
+                  echo "  ✓ Pushed $(basename "$FILE")"
+                  return 0
+                fi
+                sleep $((3 + RANDOM % 7))
+              done
+              echo "  ✗ Failed to push $(basename "$FILE") after 5 retries"
+            fi
+          }
+
+          # ── collect all files ────────────────────────────────────────────
+          ALL_FILES=()
+          while IFS= read -r -d '' F; do ALL_FILES+=("$F"); done \
+            < <(find telegram_files -name "README.md" -print0 2>/dev/null)
+          while IFS= read -r -d '' F; do ALL_FILES+=("$F"); done \
+            < <(find telegram_files -type f ! -name "README.md" -print0 2>/dev/null | sort -z)
+
+          TOTAL_FILES=${#ALL_FILES[@]}
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No files to push."
+            exit 0
+          fi
+
+          TOTAL_SIZE=0
+          for F in "${ALL_FILES[@]}"; do
+            [ -f "$F" ] && TOTAL_SIZE=$(( TOTAL_SIZE + $(stat -c%s "$F" 2>/dev/null || echo 0) ))
+          done
+          TOTAL_SIZE_MB=$(( TOTAL_SIZE / 1024 / 1024 ))
+          echo "Files to push: $TOTAL_FILES  |  Total: ${TOTAL_SIZE_MB}MB"
+
+          # ── small upload: push all at once ───────────────────────────────
+          if [ "$TOTAL_SIZE_MB" -lt 100 ]; then
+            git add -A telegram_files/
+            if ! git diff --cached --quiet; then
+              git commit -m "[AVASAM] Telegram download [skip ci]"
+              PUSH_RETRY=0
+              while [ $PUSH_RETRY -lt 10 ]; do
+                PUSH_RETRY=$(( PUSH_RETRY + 1 ))
+                if timeout 300 git push origin HEAD:"$BRANCH"; then
+                  echo "Push successful!"
+                  break
+                fi
+                echo "Push failed, retry $PUSH_RETRY/10..."
+                sleep $((3 + RANDOM % 7))
+                git fetch origin "$BRANCH"
+                git reset --hard origin/"$BRANCH"
+                mkdir -p telegram_files
+                cp -r "$BACKUP_DIR"/* telegram_files/
+                git add -A telegram_files/
+                if ! git diff --cached --quiet; then
+                  git commit -m "[AVASAM] Telegram download [skip ci]"
+                fi
+              done
+            fi
+            exit 0
+          fi
+
+          # ── large upload: batch push ─────────────────────────────────────
+          echo "Large upload — using incremental batch push..."
+          BATCH_FILES=()
+          BATCH_SIZE=0
+          BATCH_LIMIT=$(( 80 * 1024 * 1024 ))   # 80 MB per batch
+          TOTAL_PUSHED=0
+
+          flush_batch() {
+            [ ${#BATCH_FILES[@]} -eq 0 ] && return
+            TOTAL_PUSHED=$(( TOTAL_PUSHED + ${#BATCH_FILES[@]} ))
+            echo ">>> Pushing batch ($TOTAL_PUSHED/$TOTAL_FILES files)..."
+            git fetch origin "$BRANCH" --quiet 2>/dev/null || true
+            git reset --hard origin/"$BRANCH" 2>/dev/null || true
+            mkdir -p telegram_files
+            cp -r "$BACKUP_DIR"/* telegram_files/ 2>/dev/null || true
+            for BF in "${BATCH_FILES[@]}"; do git add "$BF" 2>/dev/null || true; done
+            if ! git diff --cached --quiet 2>/dev/null; then
+              git commit -m "[AVASAM] Add batch of ${#BATCH_FILES[@]} files [skip ci]" --quiet 2>/dev/null || true
+              local RETRY=0
+              while [ $RETRY -lt 5 ]; do
+                RETRY=$(( RETRY + 1 ))
+                if timeout 180 git push origin HEAD:"$BRANCH" 2>&1; then
+                  echo "  ✓ Batch pushed."
+                  break
+                fi
+                echo "  Batch push failed, retry $RETRY/5..."
+                sleep $((3 + RANDOM % 7))
+                git fetch origin "$BRANCH" --quiet 2>/dev/null || true
+                git reset --hard origin/"$BRANCH" 2>/dev/null || true
+                mkdir -p telegram_files
+                cp -r "$BACKUP_DIR"/* telegram_files/ 2>/dev/null || true
+                for BF in "${BATCH_FILES[@]}"; do git add "$BF" 2>/dev/null || true; done
+                if ! git diff --cached --quiet 2>/dev/null; then
+                  git commit -m "[AVASAM] Add batch [skip ci]" --quiet 2>/dev/null || true
+                fi
+              done
+            fi
+            BATCH_FILES=()
+            BATCH_SIZE=0
+            sleep 2
+          }
+
+          for FILE in "${ALL_FILES[@]}"; do
+            [ -f "$FILE" ] || continue
+            FSIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+
+            if [ "$FSIZE" -gt "$(( SPLIT_BYTES ))" ]; then
+              flush_batch
+              push_single_file "$FILE"
+              continue
+            fi
+
+            BATCH_FILES+=("$FILE")
+            BATCH_SIZE=$(( BATCH_SIZE + FSIZE ))
+
+            if [ "$BATCH_SIZE" -ge "$BATCH_LIMIT" ]; then
+              flush_batch
+            fi
+          done
+          flush_batch
+
+          echo ""
+          echo "=========================================="
+          echo "All Telegram files pushed successfully!"
+          echo "AVASAM (https://avasam.ir)"
+          echo "=========================================="
