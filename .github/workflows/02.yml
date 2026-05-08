@@ -108,23 +108,38 @@ jobs:
 
               print("  🔍 Trying direct CDN...")
               try:
-                  r = subprocess.run(['curl', '-sL', '--max-time', '20'] + headers + [link],
+                  # Follow redirects and try to get the actual file URL
+                  r = subprocess.run(['curl', '-sL', '--max-time', '20', '-w', '\n%{url_effective}'] + headers + [link],
                       capture_output=True, text=True, timeout=25)
                   if r.returncode == 0:
+                      # Check if we got redirected to a CDN URL directly
+                      lines = r.stdout.split('\n')
+                      final_url = lines[-1] if lines else ''
+
+                      if 'telesco.pe/file/' in final_url or 'telegram.org/file/' in final_url:
+                          name = urllib.parse.unquote(final_url.split('/')[-1].split('?')[0])
+                          print(f"  ✅ Found CDN link via redirect!")
+                          return final_url, name, None
+
+                      # Otherwise search in HTML response
                       cdn_patterns = [
-                          r'https://cdn[0-9]*\.telesco\.pe/file/[^"<>\s]+',
-                          r'https://[^"<>\s]*tg[^"<>\s]*\.com/[^"<>\s]+\.(?:mp4|zip|rar|7z|pdf|mp3)[^"<>\s]*',
+                          r'https://cdn[0-9]*\.telesco\.pe/file/[a-zA-Z0-9_-]+',
+                          r'https://[^"<>\s]*telegram\.org/file/[^"<>\s]+',
                       ]
                       for pattern in cdn_patterns:
                           match = re.search(pattern, r.stdout)
                           if match:
                               url = match.group(0)
-                              name = urllib.parse.unquote(url.split('/')[-1].split('?')[0])
-                              print(f"  ✅ Found CDN link!")
-                              return url, name, None
+                              # Validate it's not just a template/example URL
+                              if len(url) > 50:  # Real CDN URLs are long
+                                  name = urllib.parse.unquote(url.split('/')[-1].split('?')[0])
+                                  print(f"  ✅ Found CDN link in HTML!")
+                                  print(f"  ⚠️ Warning: Direct CDN links may require authentication")
+                                  return url, name, None
               except Exception as e:
                   print(f"  ⚠️ Error: {e}")
 
+              print("  ❌ All resolvers failed")
               return None, None, None
 
           def is_valid_file(path, min_size_kb=100, expected_bytes=None):
@@ -134,32 +149,46 @@ jobs:
               actual_size = os.path.getsize(path)
               size_kb = actual_size / 1024
 
-              if size_kb < min_size_kb:
-                  return False, f"Too small ({size_kb:.1f} KB)"
-
-              # Verify file size matches expected if provided
-              if expected_bytes and actual_size < expected_bytes * 0.95:
-                  return False, f"Incomplete download ({actual_size}/{expected_bytes} bytes, {actual_size*100/expected_bytes:.1f}%)"
-
+              # CHECK CONTENT FIRST before checking size (error pages can be small)
               try:
                   with open(path, 'rb') as f:
-                      header = f.read(1024).lower()
+                      header = f.read(2048).lower()
+
+                      # Log first 200 chars for debugging if file is suspiciously small
+                      if size_kb < 50:
+                          preview = header[:200].decode('utf-8', errors='ignore')
+                          print(f"    🔍 File preview (first 200 chars): {preview}")
+
                       if b'<!doctype' in header or b'<html' in header:
                           return False, "HTML error page"
                       if b'{"error"' in header or b'"error":' in header:
                           return False, "JSON error response"
-                      if b'access denied' in header:
+                      if b'access denied' in header or b'forbidden' in header:
                           return False, "Access denied"
-              except:
-                  pass
+                      if b'not found' in header and size_kb < 100:
+                          return False, "404 Not Found"
+                      if b'<error>' in header or b'<message>' in header:
+                          return False, "XML error response"
+              except Exception as e:
+                  print(f"    ⚠️ Content check error: {e}")
 
+              # Check MIME type
               try:
                   r = subprocess.run(['file', '--mime-type', '-b', path], capture_output=True, text=True, timeout=10)
                   mime = r.stdout.strip()
-                  if mime in ['text/html', 'text/plain'] and size_kb < 500:
+                  print(f"    🔍 MIME type: {mime}")
+                  if mime in ['text/html', 'text/plain', 'application/json'] and size_kb < 500:
                       return False, f"Invalid type: {mime}"
               except:
                   pass
+
+              # NOW check size
+              if size_kb < min_size_kb:
+                  return False, f"Too small ({size_kb:.1f} KB, expected >{min_size_kb} KB)"
+
+              # Verify file size matches expected if provided
+              if expected_bytes and actual_size < expected_bytes * 0.95:
+                  return False, f"Incomplete download ({actual_size}/{expected_bytes} bytes, {actual_size*100/expected_bytes:.1f}%)"
 
               return True, "OK"
 
@@ -194,6 +223,18 @@ jobs:
                   '-H', 'Referer: https://t.me/'
               ]
 
+              # First try to check what HTTP status we get
+              print(f"    🔍 Checking URL accessibility...")
+              try:
+                  check_result = subprocess.run(['curl', '-sI', '-L', '--max-time', '10', '-w', '%{http_code}'] + headers + [url],
+                      capture_output=True, text=True, timeout=15)
+                  http_code = check_result.stdout.strip().split('\n')[-1]
+                  print(f"    📡 HTTP Status: {http_code}")
+                  if http_code.startswith('4') or http_code.startswith('5'):
+                      print(f"    ⚠️ Server returned error status {http_code}")
+              except:
+                  pass
+
               # Reduced connections from 16 to 4 to avoid rate limiting
               methods = [
                   ('aria2c', ['aria2c', '-x4', '-s4', '-k1M', '--max-tries=5', '--retry-wait=3',
@@ -204,8 +245,10 @@ jobs:
                       '--header=Referer: https://t.me/',
                       '-d', os.path.dirname(path), '-o', os.path.basename(path), url]),
                   # Removed -C - flag (resume) since we start fresh, added --retry-all-errors
-                  ('curl', ['curl', '-L', '-f', '-S', '--max-time', '3600', '--retry', '5',
-                      '--retry-delay', '3', '--retry-max-time', '1800', '--retry-all-errors'] + headers + ['-o', path, url]),
+                  # Also removed -f flag to allow downloading error pages so we can inspect them
+                  ('curl', ['curl', '-L', '-S', '--max-time', '3600', '--retry', '5',
+                      '--retry-delay', '3', '--retry-max-time', '1800', '--retry-all-errors',
+                      '-w', '\nHTTP_CODE:%{http_code}'] + headers + ['-o', path, url]),
                   # Fallback: simple wget
                   ('wget', ['wget', '--timeout=300', '--tries=5', '--wait=3', '--random-wait',
                       '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -224,6 +267,13 @@ jobs:
                               time.sleep(2)
 
                           result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+
+                          # Extract HTTP code from curl output if present
+                          if name == 'curl' and result.stderr:
+                              http_match = re.search(r'HTTP_CODE:(\d+)', result.stderr)
+                              if http_match:
+                                  http_code = http_match.group(1)
+                                  print(f"    📡 HTTP Response: {http_code}")
 
                           # Log errors if any
                           if result.returncode != 0:
