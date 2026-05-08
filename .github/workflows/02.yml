@@ -1,0 +1,203 @@
+name: Telegram Downloader 2
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_links:
+        description: 'Telegram links (comma/space/newline separated)'
+        required: true
+      password:
+        description: 'Archive password (optional)'
+        default: ''
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 p7zip-full
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          mkdir -p downloads
+
+      - name: Download Files
+        run: |
+          python3 << 'PY'
+          import os, json, subprocess, re, urllib.parse, hashlib
+
+          MAX_SIZE_MB = 80
+          PASSWORD = """${{ inputs.password }}"""
+          REPO = "${{ github.repository }}"
+          BRANCH = "${{ github.ref_name }}"
+
+          # Parse links
+          raw = """${{ inputs.telegram_links }}"""
+          links = list(dict.fromkeys([l.strip() for l in re.split(r'[,\s\n]+', raw) if l.strip().startswith('http')]))
+          print(f"Found {len(links)} link(s)")
+
+          def safe_name(name):
+              base, ext = os.path.splitext(name)
+              if not ext: ext = '.bin'
+              safe = re.sub(r'[^a-zA-Z0-9._-]', '_', base)[:50] or hashlib.md5(name.encode()).hexdigest()[:12]
+              return f"{safe}{ext.lower()}"
+
+          def resolve(link):
+              # Method 1: telegramdownloader.net
+              try:
+                  r = subprocess.run(['curl', '-s', '--max-time', '30', '-X', 'POST',
+                      '-H', 'Content-Type: application/x-www-form-urlencoded',
+                      '-d', f'telegram_link={urllib.parse.quote(link)}',
+                      'https://telegramdownloader.net/proxy.php'], capture_output=True, text=True, timeout=35)
+                  if r.returncode == 0:
+                      data = json.loads(r.stdout)
+                      url = data.get('data', {}).get('data', {}).get('link')
+                      name = data.get('data', {}).get('data', {}).get('file_name')
+                      if url: return url, name
+              except: pass
+
+              # Method 2: tgsave.com
+              try:
+                  r = subprocess.run(['curl', '-s', '--max-time', '30', '-X', 'POST',
+                      '-H', 'Content-Type: application/json',
+                      '-d', json.dumps({"url": link}),
+                      'https://api.tgsave.com/download'], capture_output=True, text=True, timeout=35)
+                  if r.returncode == 0:
+                      data = json.loads(r.stdout)
+                      url = data.get('url') or data.get('link')
+                      name = data.get('filename') or data.get('file_name')
+                      if url: return url, name
+              except: pass
+
+              return None, None
+
+          def download(url, path):
+              for cmd in [
+                  ['curl', '-L', '-f', '-S', '--max-time', '7200', '-o', path, url],
+                  ['aria2c', '-x4', '-s4', '--max-tries=3', '--timeout=600', '-d', os.path.dirname(path), '-o', os.path.basename(path), url]
+              ]:
+                  try:
+                      if subprocess.run(cmd, capture_output=True, timeout=7200).returncode == 0 and os.path.exists(path):
+                          size = os.path.getsize(path)
+                          if size > 1024:
+                              with open(path, 'rb') as f:
+                                  if b'<!doctype' not in f.read(512).lower():
+                                      return True
+                              os.remove(path)
+                  except: pass
+              return False
+
+          results = []
+          for idx, link in enumerate(links, 1):
+              print(f"\n[{idx}/{len(links)}] {link[:60]}...")
+              url, name = resolve(link)
+              if not url:
+                  print("  Failed to resolve")
+                  continue
+
+              name = safe_name(name or url.split('/')[-1].split('?')[0] or f"file_{idx}")
+              folder = os.path.splitext(name)[0]
+
+              # Unique folder
+              base_folder = folder
+              counter = 1
+              while os.path.exists(f"downloads/{folder}"):
+                  folder = f"{base_folder}_{counter}"
+                  counter += 1
+
+              os.makedirs(f"downloads/{folder}", exist_ok=True)
+              filepath = f"downloads/{folder}/{name}"
+
+              if download(url, filepath):
+                  size_mb = os.path.getsize(filepath) / (1024*1024)
+                  print(f"  Downloaded: {name} ({size_mb:.1f} MB)")
+                  results.append({'name': name, 'folder': folder, 'link': link, 'size': size_mb})
+              else:
+                  print("  Download failed")
+                  try: os.rmdir(f"downloads/{folder}")
+                  except: pass
+
+          # Package large files
+          COMPRESSED = {'.zip', '.rar', '.7z', '.gz', '.xz', '.tar'}
+          for r in results:
+              folder, name = r['folder'], r['name']
+              filepath = f"downloads/{folder}/{name}"
+              if not os.path.exists(filepath): continue
+
+              size_mb = os.path.getsize(filepath) / (1024*1024)
+              ext = os.path.splitext(name)[1].lower()
+              base = os.path.splitext(name)[0]
+              parts = []
+
+              os.chdir(f"downloads/{folder}")
+
+              if ext in COMPRESSED and size_mb > MAX_SIZE_MB:
+                  # Split existing archive: file.zip -> file.zip, file-part01.zip, file-part02.zip
+                  subprocess.run(['split', '-b', f'{MAX_SIZE_MB}m', '-d', '-a', '2', name, f'{base}-part'], capture_output=True)
+                  os.remove(name)
+                  for i, p in enumerate(sorted([f for f in os.listdir('.') if f.startswith(f'{base}-part')])):
+                      new_name = f"{base}{ext}" if i == 0 else f"{base}-part{i:02d}{ext}"
+                      os.rename(p, new_name)
+                      parts.append(new_name)
+              elif size_mb > MAX_SIZE_MB:
+                  # Create split archive
+                  cmd = ['7z', 'a', f'-v{MAX_SIZE_MB}m', '-mx=1']
+                  if PASSWORD: cmd += [f'-p{PASSWORD}', '-mhe=on']
+                  subprocess.run(cmd + [f'{base}.zip', name], capture_output=True)
+                  os.remove(name)
+                  for i, p in enumerate(sorted([f for f in os.listdir('.') if f.startswith(f'{base}.zip')])):
+                      new_name = f"{base}.zip" if i == 0 else f"{base}-part{i:02d}.zip"
+                      os.rename(p, new_name)
+                      parts.append(new_name)
+              elif PASSWORD and ext not in COMPRESSED:
+                  subprocess.run(['7z', 'a', f'-p{PASSWORD}', '-mhe=on', f'{base}.zip', name], capture_output=True)
+                  os.remove(name)
+                  parts.append(f'{base}.zip')
+              else:
+                  parts.append(name)
+
+              os.chdir('../..')
+              r['parts'] = parts
+
+          # Generate READMEs
+          for r in results:
+              folder = r['folder']
+              raw_base = f"https://github.com/{REPO}/raw/refs/heads/{BRANCH}/downloads/{urllib.parse.quote(folder)}"
+
+              lines = [f"# {r['name']}", "", "## Download Links", ""]
+              for p in r.get('parts', [r['name']]):
+                  url = f"{raw_base}/{urllib.parse.quote(p)}"
+                  lines.append(f"- [{p}]({url})")
+
+              if len(r.get('parts', [])) > 1:
+                  lines += ["", "## Reassemble", "```bash", "# Linux/Mac", f"cat {r['parts'][0].rsplit('.', 1)[0]}*.zip > combined.zip", "# Or use 7z:", "7z x {first_part}", "```"]
+
+              lines += ["", f"Source: {r['link']}"]
+
+              with open(f"downloads/{folder}/README.md", 'w') as f:
+                  f.write('\n'.join(lines))
+
+          # Main README
+          with open('downloads/README.md', 'w') as f:
+              f.write("# Downloads\n\n| File | Size | Folder |\n|------|------|--------|\n")
+              for r in results:
+                  f.write(f"| {r['name']} | {r['size']:.1f} MB | [{r['folder']}](./{urllib.parse.quote(r['folder'])}) |\n")
+
+          print(f"\nCompleted: {len(results)} file(s)")
+          PY
+
+      - name: Push
+        run: |
+          git add downloads/
+          git diff --staged --quiet && exit 0
+          git commit -m "Download $(git diff --staged --name-only | wc -l) file(s)"
+          git push || (git pull --rebase && git push)
