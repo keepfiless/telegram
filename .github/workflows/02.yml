@@ -54,6 +54,29 @@ jobs:
               safe = re.sub(r'[^a-zA-Z0-9._-]', '_', base)[:50] or hashlib.md5(name.encode()).hexdigest()[:12]
               return f"{safe}{ext.lower()}"
 
+          def probe_url(url, headers):
+              """HEAD-check a URL: return (final_url, content_length, content_type) or None if it looks wrong."""
+              try:
+                  h = requests.head(url, headers=headers, allow_redirects=True, timeout=30)
+                  final_url = h.url
+                  ct = h.headers.get('content-type', '').lower()
+                  cl = int(h.headers.get('content-length', 0))
+                  # Reject HTML / JSON error pages and tiny files
+                  if 'text/html' in ct or 'text/plain' in ct:
+                      print(f"    ⚠️ URL returns HTML/text (probably an error page), skipping")
+                      sys.stdout.flush()
+                      return None
+                  if cl and cl < 100 * 1024:
+                      print(f"    ⚠️ URL content-length is only {cl} bytes — likely wrong file, skipping")
+                      sys.stdout.flush()
+                      return None
+                  return final_url, cl, ct
+              except Exception as e:
+                  # HEAD not supported — fall back to treating as valid
+                  print(f"    ℹ️ HEAD probe failed ({e}), will attempt download anyway")
+                  sys.stdout.flush()
+                  return (url, 0, '')
+
           def resolve(link):
               headers = {
                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -79,9 +102,16 @@ jobs:
                       name = data.get('data', {}).get('data', {}).get('file_name')
                       size = data.get('data', {}).get('data', {}).get('file_size')
                       if url:
-                          print(f"  ✅ Resolved! Size: {size or 'unknown'}")
-                          sys.stdout.flush()
-                          return url, name, size
+                          probe = probe_url(url, headers)
+                          if probe:
+                              final_url, cl, ct = probe
+                              reported_size = cl or size
+                              print(f"  ✅ Resolved via telegramdownloader.net! Size: {reported_size or 'unknown'}")
+                              sys.stdout.flush()
+                              return final_url, name, reported_size
+                          else:
+                              print("  ⚠️ telegramdownloader.net URL failed probe, trying next...")
+                              sys.stdout.flush()
               except Exception as e:
                   print(f"  ⚠️ Error: {e}")
                   sys.stdout.flush()
@@ -106,9 +136,16 @@ jobs:
                       name = data.get('filename') or data.get('file_name')
                       size = data.get('size') or data.get('file_size')
                       if url:
-                          print(f"  ✅ Resolved! Size: {size or 'unknown'}")
-                          sys.stdout.flush()
-                          return url, name, size
+                          probe = probe_url(url, headers)
+                          if probe:
+                              final_url, cl, ct = probe
+                              reported_size = cl or size
+                              print(f"  ✅ Resolved via tgsave.com! Size: {reported_size or 'unknown'}")
+                              sys.stdout.flush()
+                              return final_url, name, reported_size
+                          else:
+                              print("  ⚠️ tgsave.com URL failed probe, trying next...")
+                              sys.stdout.flush()
               except Exception as e:
                   print(f"  ⚠️ Error: {e}")
                   sys.stdout.flush()
@@ -126,10 +163,16 @@ jobs:
                           match = re.search(pattern, r.text)
                           if match:
                               url = match.group(0)
-                              name = urllib.parse.unquote(url.split('/')[-1].split('?')[0])
-                              print(f"  ✅ Found CDN link!")
-                              sys.stdout.flush()
-                              return url, name, None
+                              probe = probe_url(url, headers)
+                              if probe:
+                                  final_url, cl, ct = probe
+                                  name = urllib.parse.unquote(final_url.split('/')[-1].split('?')[0])
+                                  print(f"  ✅ Found CDN link!")
+                                  sys.stdout.flush()
+                                  return final_url, name, cl or None
+                              else:
+                                  print("  ⚠️ CDN URL failed probe, skipping")
+                                  sys.stdout.flush()
               except Exception as e:
                   print(f"  ⚠️ Error: {e}")
                   sys.stdout.flush()
@@ -149,9 +192,28 @@ jobs:
                   print(f"    🔄 Downloading with Python requests...")
                   sys.stdout.flush()
 
-                  with requests.get(url, headers=headers, stream=True, timeout=600) as r:
+                  with requests.get(url, headers=headers, stream=True, timeout=600, allow_redirects=True) as r:
                       r.raise_for_status()
-                      
+
+                      # If we were redirected to an HTML page, bail out immediately
+                      ct = r.headers.get('content-type', '').lower()
+                      if 'text/html' in ct or 'text/plain' in ct:
+                          print(f"    ⚠️ Server returned {ct} — likely an error page, aborting")
+                          sys.stdout.flush()
+                          return False
+
+                      # Honour Content-Disposition filename if present (more reliable than URL)
+                      cd = r.headers.get('content-disposition', '')
+                      if cd:
+                          m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)', cd, re.IGNORECASE)
+                          if m:
+                              cd_name = urllib.parse.unquote(m.group(1).strip())
+                              new_path = os.path.join(os.path.dirname(path), safe_name(cd_name))
+                              if new_path != path:
+                                  print(f"    📎 Using Content-Disposition filename: {cd_name}")
+                                  sys.stdout.flush()
+                                  path = new_path
+
                       total_size = int(r.headers.get('content-length', 0))
                       if total_size:
                           print(f"    📏 File size: {total_size / (1024*1024):.1f} MB")
@@ -177,9 +239,9 @@ jobs:
                   if os.path.exists(path):
                       actual_size = os.path.getsize(path)
                       
-                      # Check if file is too small
-                      if actual_size < 100 * 1024:  # Less than 100KB
-                          print(f"    ⚠️ File too small: {actual_size} bytes")
+                      # Check if file is too small (likely a thumbnail/error response)
+                      if actual_size < 1024 * 1024:  # Less than 1 MB
+                          print(f"    ⚠️ File too small ({actual_size} bytes) — likely a thumbnail or error response")
                           sys.stdout.flush()
                           os.remove(path)
                           return False
