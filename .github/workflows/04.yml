@@ -26,15 +26,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install beautifulsoup4==4.11.1 html2text==2020.1.16 pyperclip==1.8.2 requests==2.28.2
+          pip install beautifulsoup4 requests
 
-      - name: Download Telegram scraper
+      - name: Download media and text from Telegram
         run: |
-          wget -q https://raw.githubusercontent.com/Steelio/Telegram-Post-Scraper/main/main.py
-
-      - name: Run scraper and download media
-        run: |
-          printf "${{ github.event.inputs.telegram_link }}\n4\n" | python main.py
+          python download_telegram.py "${{ github.event.inputs.telegram_link }}"
 
       - name: Commit and push downloaded files
         run: |
