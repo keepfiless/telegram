@@ -34,7 +34,7 @@ jobs:
       - name: 📥 Download Files
         run: |
           python3 << 'PY'
-          import os, json, subprocess, re, urllib.parse, hashlib, glob
+          import os, json, subprocess, re, urllib.parse, hashlib, glob, time
 
           MAX_SIZE_MB = 80
           PASSWORD = """${{ inputs.password }}"""
@@ -194,40 +194,82 @@ jobs:
                   '-H', 'Referer: https://t.me/'
               ]
 
+              # Reduced connections from 16 to 4 to avoid rate limiting
               methods = [
-                  ('aria2c', ['aria2c', '-x16', '-s16', '-k1M', '--max-tries=10', '--retry-wait=5',
-                      '--timeout=600', '--connect-timeout=60', '--allow-overwrite=true',
-                      '--file-allocation=none', '--continue=true', '--auto-file-renaming=false',
+                  ('aria2c', ['aria2c', '-x4', '-s4', '-k1M', '--max-tries=5', '--retry-wait=3',
+                      '--timeout=300', '--connect-timeout=30', '--allow-overwrite=true',
+                      '--file-allocation=none', '--continue=false', '--auto-file-renaming=false',
+                      '--max-connection-per-server=4', '--split=4', '--min-split-size=1M',
                       '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                       '--header=Referer: https://t.me/',
                       '-d', os.path.dirname(path), '-o', os.path.basename(path), url]),
-                  ('curl', ['curl', '-L', '-f', '-S', '-C', '-', '--max-time', '7200', '--retry', '5',
-                      '--retry-delay', '5', '--retry-max-time', '3600'] + headers + ['-o', path, url])
+                  # Removed -C - flag (resume) since we start fresh, added --retry-all-errors
+                  ('curl', ['curl', '-L', '-f', '-S', '--max-time', '3600', '--retry', '5',
+                      '--retry-delay', '3', '--retry-max-time', '1800', '--retry-all-errors'] + headers + ['-o', path, url]),
+                  # Fallback: simple wget
+                  ('wget', ['wget', '--timeout=300', '--tries=5', '--wait=3', '--random-wait',
+                      '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                      '--referer=https://t.me/', '-O', path, url])
               ]
 
               for name, cmd in methods:
-                  print(f"    🔄 Trying {name}...")
-                  try:
-                      if os.path.exists(path): os.remove(path)
-                      result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-                      for f in glob.glob(f"{path}*.aria2"):
-                          try: os.remove(f)
-                          except: pass
+                  # Try each method up to 2 times
+                  for attempt in range(1, 3):
+                      print(f"    🔄 Trying {name} (attempt {attempt}/2)...")
+                      try:
+                          if os.path.exists(path): os.remove(path)
 
-                      if os.path.exists(path):
-                          is_valid, reason = is_valid_file(path, min_kb, expected_bytes)
-                          if is_valid:
-                              size_mb = os.path.getsize(path) / (1024*1024)
-                              print(f"    ✅ Success! ({size_mb:.1f} MB)")
-                              return True
-                          else:
-                              print(f"    ⚠️ Invalid: {reason}")
-                              if "Incomplete" in reason:
-                                  print(f"    🔄 Retrying with different method...")
+                          # Small delay before download to avoid rate limiting
+                          if attempt > 1:
+                              time.sleep(2)
+
+                          result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+
+                          # Log errors if any
+                          if result.returncode != 0:
+                              print(f"    ⚠️ {name} exit code: {result.returncode}")
+                              if result.stderr:
+                                  # Print first 500 chars of stderr
+                                  stderr_preview = result.stderr[:500].strip()
+                                  if stderr_preview:
+                                      print(f"    ⚠️ Error output: {stderr_preview}")
+
+                          for f in glob.glob(f"{path}*.aria2"):
+                              try: os.remove(f)
+                              except: pass
+
+                          if os.path.exists(path):
+                              actual_size = os.path.getsize(path)
+                              print(f"    📦 Downloaded: {actual_size / (1024*1024):.2f} MB")
+
+                              is_valid, reason = is_valid_file(path, min_kb, expected_bytes)
+                              if is_valid:
+                                  size_mb = actual_size / (1024*1024)
+                                  print(f"    ✅ Success! ({size_mb:.1f} MB)")
+                                  return True
                               else:
-                                  os.remove(path)
-                  except Exception as e:
-                      print(f"    ⚠️ Error: {e}")
+                                  print(f"    ⚠️ Invalid: {reason}")
+                                  if "Incomplete" in reason and attempt < 2:
+                                      print(f"    🔄 Retrying same method...")
+                                      continue
+                                  elif attempt == 2:
+                                      print(f"    ⏭️ Moving to next method...")
+                                  try:
+                                      os.remove(path)
+                                  except:
+                                      pass
+                          else:
+                              print(f"    ⚠️ No file created by {name}")
+
+                      except subprocess.TimeoutExpired:
+                          print(f"    ⚠️ {name} timed out after 1 hour")
+                      except Exception as e:
+                          print(f"    ⚠️ Exception: {type(e).__name__}: {e}")
+
+                      # Break inner retry loop if not incomplete error
+                      break
+
+              print(f"    ❌ All download methods failed")
               return False
 
           results = []
@@ -240,6 +282,8 @@ jobs:
               if not url:
                   print("  ❌ Failed to resolve")
                   continue
+
+              print(f"  🔗 Download URL: {url[:80]}...")
 
               name = safe_name(name or url.split('/')[-1].split('?')[0] or f"file_{idx}")
               folder = os.path.splitext(name)[0]
@@ -261,7 +305,7 @@ jobs:
                   results.append({'name': name, 'folder': folder, 'link': link, 'size': size_mb})
                   print(f"  ✅ Downloaded!")
               else:
-                  print(f"  ❌ Failed")
+                  print(f"  ❌ Failed to download after all attempts")
                   try: os.rmdir(f"downloads/{folder}")
                   except: pass
 
