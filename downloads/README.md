@@ -1,6 +1,6 @@
 # 📥 Downloaded Telegram Files
 
-**Last Updated:** 2026-05-08 at 01:31:58
+**Last Updated:** 2026-05-08 at 02:01:01
 
 ---
 
@@ -9,7 +9,7 @@
 | Metric | Value |
 |--------|-------|
 | **Total Files** | 1 |
-| **Total Size** | 121.06 MB |
+| **Total Size** | 0.06 MB |
 
 ---
 
@@ -17,7 +17,7 @@
 
 | # | File | Size | Parts | Folder |
 |---|------|------|-------|--------|
-| 1 | 02-linux-for-programmers-rendered-optmized.zip | 121.06 MB | 2 | [📁 02-linux-for-programmers-rendered-optmized_copy1](./02-linux-for-programmers-rendered-optmized_copy1) |
+| 1 | 02-linux-for-programmers-rendered-optmized.zip | 0.06 MB | 1 | [📁 02-linux-for-programmers-rendered-optmized_copy2](./02-linux-for-programmers-rendered-optmized_copy2) |
 
 ---
 
@@ -27,22 +27,13 @@
 2. Each folder contains a `README.md` with download instructions
 3. Download the file(s) and use them!
 
-### ⚠️ Large Files (Split Archives)
-
-Some files were split into multiple parts due to size limits.
-For these files:
-
-1. Download **ALL** parts (`.z01`, `.z02`, ... and `.zip`) to the **same folder**
-2. Extract the `.zip` file using WinRAR or 7-Zip
-3. The tool will automatically combine all parts
-
 ### Supported Tools
 
 | Platform | Tools |
 |----------|-------|
-| **Windows** | File Explorer, WinRAR, 7-Zip |
-| **macOS** | Archive Utility, The Unarchiver, Keka |
-| **Linux** | File Manager, Ark, `unzip` command |
+| **Windows** | 7-Zip, WinRAR, File Explorer |
+| **macOS** | The Unarchiver, Keka, Archive Utility |
+| **Linux** | 7z, unzip, Ark, File Manager |
 
 ---
 

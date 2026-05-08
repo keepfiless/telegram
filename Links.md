@@ -1,6 +1,6 @@
 # 📥 Telegram Downloads
 
-**Generated:** 2026-05-08 at 01:31:58
+**Generated:** 2026-05-08 at 02:01:01
 
 ---
 
@@ -9,7 +9,7 @@
 | Metric | Value |
 |--------|-------|
 | **Files Downloaded** | 1 |
-| **Total Size** | 121.06 MB |
+| **Total Size** | 0.06 MB |
 
 ---
 
@@ -21,18 +21,13 @@
 |----------|-------|
 | **Status** | ✅ 100% Downloaded |
 | **Source** | [Telegram Link](https://t.me/avasam_edu/966) |
-| **Folder** | `02-linux-for-programmers-rendered-optmized_copy1` |
-| **Size** | 121.06 MB |
-| **Parts** | 2 |
+| **Folder** | `02-linux-for-programmers-rendered-optmized_copy2` |
+| **Size** | 0.06 MB |
+| **Parts** | 1 |
 
-**📦 Download Parts (Split Archive):**
+**📥 Download:** [**02-linux-for-programmers-rendered-optmized.zip**](https://github.com/keepfiless/telegram/raw/refs/heads/main/downloads/02-linux-for-programmers-rendered-optmized_copy2/02-linux-for-programmers-rendered-optmized.zip) (0.06 MB)
 
-| # | File | Size | Link |
-|---|------|------|------|
-| 1 | `02-linux-for-programmers-rendered-optmized.z01` | 80.0 MB | [⬇️ Download](https://github.com/keepfiless/telegram/raw/refs/heads/main/downloads/02-linux-for-programmers-rendered-optmized_copy1/02-linux-for-programmers-rendered-optmized.z01) |
-| 2 | `02-linux-for-programmers-rendered-optmized.zip` | 41.06 MB | [⬇️ Download](https://github.com/keepfiless/telegram/raw/refs/heads/main/downloads/02-linux-for-programmers-rendered-optmized_copy1/02-linux-for-programmers-rendered-optmized.zip) |
-
-> 💡 **To extract:** Download ALL parts to the same folder. Then extract the `.zip` file with WinRAR, 7-Zip, or any ZIP tool. All parts must be present. On macOS/Linux, you can run: `zip -s 0 filename.zip --out combined.zip && unzip combined.zip`.
+> 💡 **To extract:** Use 7-Zip, WinRAR, or your system's archive tool.
 
 ---
 
