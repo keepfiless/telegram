@@ -33,7 +33,7 @@ jobs:
       - name: Download Files
         run: |
           python3 << 'PY'
-          import os, json, subprocess, re, urllib.parse, hashlib
+          import os, json, subprocess, re, urllib.parse, hashlib, glob
 
           MAX_SIZE_MB = 80
           PASSWORD = """${{ inputs.password }}"""
@@ -81,12 +81,22 @@ jobs:
               return None, None
 
           def download(url, path):
+              # Clean up any existing aria2 files
+              for f in glob.glob(f"{path}*.aria2"):
+                  try: os.remove(f)
+                  except: pass
+
               for cmd in [
                   ['curl', '-L', '-f', '-S', '--max-time', '7200', '-o', path, url],
                   ['aria2c', '-x4', '-s4', '--max-tries=3', '--timeout=600', '-d', os.path.dirname(path), '-o', os.path.basename(path), url]
               ]:
                   try:
-                      if subprocess.run(cmd, capture_output=True, timeout=7200).returncode == 0 and os.path.exists(path):
+                      subprocess.run(cmd, capture_output=True, timeout=7200)
+                      # Clean aria2 temp files
+                      for f in glob.glob(f"{path}*.aria2"):
+                          try: os.remove(f)
+                          except: pass
+                      if os.path.exists(path):
                           size = os.path.getsize(path)
                           if size > 1024:
                               with open(path, 'rb') as f:
@@ -138,34 +148,50 @@ jobs:
               base = os.path.splitext(name)[0]
               parts = []
 
+              orig_dir = os.getcwd()
               os.chdir(f"downloads/{folder}")
 
-              if ext in COMPRESSED and size_mb > MAX_SIZE_MB:
-                  # Split existing archive: file.zip -> file.zip, file-part01.zip, file-part02.zip
-                  subprocess.run(['split', '-b', f'{MAX_SIZE_MB}m', '-d', '-a', '2', name, f'{base}-part'], capture_output=True)
-                  os.remove(name)
-                  for i, p in enumerate(sorted([f for f in os.listdir('.') if f.startswith(f'{base}-part')])):
-                      new_name = f"{base}{ext}" if i == 0 else f"{base}-part{i:02d}{ext}"
-                      os.rename(p, new_name)
-                      parts.append(new_name)
-              elif size_mb > MAX_SIZE_MB:
-                  # Create split archive
-                  cmd = ['7z', 'a', f'-v{MAX_SIZE_MB}m', '-mx=1']
-                  if PASSWORD: cmd += [f'-p{PASSWORD}', '-mhe=on']
-                  subprocess.run(cmd + [f'{base}.zip', name], capture_output=True)
-                  os.remove(name)
-                  for i, p in enumerate(sorted([f for f in os.listdir('.') if f.startswith(f'{base}.zip')])):
-                      new_name = f"{base}.zip" if i == 0 else f"{base}-part{i:02d}.zip"
-                      os.rename(p, new_name)
-                      parts.append(new_name)
+              if size_mb > MAX_SIZE_MB:
+                  if ext in COMPRESSED:
+                      # Split existing archive using split command
+                      subprocess.run(['split', '-b', f'{MAX_SIZE_MB}m', '-d', '-a', '2', name, f'{base}_part'], capture_output=True)
+                      os.remove(name)
+                      split_files = sorted([f for f in os.listdir('.') if f.startswith(f'{base}_part')])
+                      for i, p in enumerate(split_files):
+                          if i == 0:
+                              new_name = f"{base}{ext}"
+                          else:
+                              new_name = f"{base}-part{i:02d}{ext}"
+                          os.rename(p, new_name)
+                          parts.append(new_name)
+                  else:
+                      # Create split zip archive using 7z
+                      cmd = ['7z', 'a', '-tzip', f'-v{MAX_SIZE_MB}m', '-mx=1']
+                      if PASSWORD: cmd += [f'-p{PASSWORD}', '-mhe=on']
+                      subprocess.run(cmd + [f'{base}.zip', name], capture_output=True)
+                      os.remove(name)
+                      # 7z creates: base.zip.001, base.zip.002, etc.
+                      split_files = sorted([f for f in os.listdir('.') if f.startswith(f'{base}.zip.')])
+                      for i, p in enumerate(split_files):
+                          if i == 0:
+                              new_name = f"{base}.zip"
+                          else:
+                              new_name = f"{base}-part{i:02d}.zip"
+                          os.rename(p, new_name)
+                          parts.append(new_name)
               elif PASSWORD and ext not in COMPRESSED:
-                  subprocess.run(['7z', 'a', f'-p{PASSWORD}', '-mhe=on', f'{base}.zip', name], capture_output=True)
+                  subprocess.run(['7z', 'a', '-tzip', f'-p{PASSWORD}', '-mhe=on', f'{base}.zip', name], capture_output=True)
                   os.remove(name)
                   parts.append(f'{base}.zip')
               else:
                   parts.append(name)
 
-              os.chdir('../..')
+              # Clean any leftover aria2 files
+              for f in glob.glob('*.aria2'):
+                  try: os.remove(f)
+                  except: pass
+
+              os.chdir(orig_dir)
               r['parts'] = parts
 
           # Generate READMEs
@@ -192,11 +218,19 @@ jobs:
               for r in results:
                   f.write(f"| {r['name']} | {r['size']:.1f} MB | [{r['folder']}](./{urllib.parse.quote(r['folder'])}) |\n")
 
+          # Final cleanup - remove all aria2 files
+          for f in glob.glob('downloads/**/*.aria2', recursive=True):
+              try: os.remove(f)
+              except: pass
+
           print(f"\nCompleted: {len(results)} file(s)")
           PY
 
       - name: Push
         run: |
+          # Clean aria2 files before commit
+          find downloads -name "*.aria2" -delete 2>/dev/null || true
+
           git add downloads/
           git diff --staged --quiet && exit 0
           git commit -m "Download $(git diff --staged --name-only | wc -l) file(s)"
