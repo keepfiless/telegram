@@ -1,5 +1,6 @@
 # 📥 Downloads
 
-| 📄 File | 📦 Size | 📁 Folder |
-|---------|---------|----------|
-| 02-linux-for-programmers-rendered-optmized.zip | 121.1 MB | [02-linux-for-programmers-rendered-optmized](./02-linux-for-programmers-rendered-optmized) |
+| 📄 File | 📦 Size | 📁 Folder | Volumes |
+|---------|---------|----------|--------|
+
+⚠️ **Note:** Files larger than 80MB are split into 7z volumes. Download ALL volumes and extract with 7-Zip. See individual folder READMEs for instructions.
