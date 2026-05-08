@@ -1,4 +1,4 @@
-name: Download Telegram Post >>
+name: Download Telegram Post
 
 on:
   workflow_dispatch:
