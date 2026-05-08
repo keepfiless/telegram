@@ -1,13 +1,13 @@
-name: Telegram Downloader 2
+name: 📥 Telegram Downloader
 
 on:
   workflow_dispatch:
     inputs:
       telegram_links:
-        description: 'Telegram links (comma/space/newline separated)'
+        description: '🔗 Telegram links (comma/space/newline separated)'
         required: true
       password:
-        description: 'Archive password (optional)'
+        description: '🔐 Archive password (optional)'
         default: ''
 
 jobs:
@@ -18,19 +18,20 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: 📂 Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup
+      - name: ⚙️ Setup
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 p7zip-full
+          sudo apt-get install -y -qq aria2 p7zip-full file
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           mkdir -p downloads
 
-      - name: Download Files
+      - name: 📥 Download Files
         run: |
           python3 << 'PY'
           import os, json, subprocess, re, urllib.parse, hashlib, glob
@@ -43,7 +44,7 @@ jobs:
           # Parse links
           raw = """${{ inputs.telegram_links }}"""
           links = list(dict.fromkeys([l.strip() for l in re.split(r'[,\s\n]+', raw) if l.strip().startswith('http')]))
-          print(f"Found {len(links)} link(s)")
+          print(f"📋 Found {len(links)} link(s)")
 
           def safe_name(name):
               base, ext = os.path.splitext(name)
@@ -52,66 +53,180 @@ jobs:
               return f"{safe}{ext.lower()}"
 
           def resolve(link):
+              headers = ['-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36']
+
               # Method 1: telegramdownloader.net
+              print("  🔍 Trying telegramdownloader.net...")
               try:
-                  r = subprocess.run(['curl', '-s', '--max-time', '30', '-X', 'POST',
+                  r = subprocess.run(['curl', '-s', '--max-time', '30', '-X', 'POST'] + headers + [
                       '-H', 'Content-Type: application/x-www-form-urlencoded',
+                      '-H', 'Origin: https://telegramdownloader.net',
+                      '-H', 'Referer: https://telegramdownloader.net/',
                       '-d', f'telegram_link={urllib.parse.quote(link)}',
                       'https://telegramdownloader.net/proxy.php'], capture_output=True, text=True, timeout=35)
-                  if r.returncode == 0:
+                  if r.returncode == 0 and r.stdout:
                       data = json.loads(r.stdout)
                       url = data.get('data', {}).get('data', {}).get('link')
                       name = data.get('data', {}).get('data', {}).get('file_name')
-                      if url: return url, name
-              except: pass
+                      size = data.get('data', {}).get('data', {}).get('file_size')
+                      if url:
+                          print(f"  ✅ Resolved! Size: {size or 'unknown'}")
+                          return url, name, size
+              except Exception as e:
+                  print(f"  ⚠️ Error: {e}")
 
               # Method 2: tgsave.com
+              print("  🔍 Trying tgsave.com...")
               try:
-                  r = subprocess.run(['curl', '-s', '--max-time', '30', '-X', 'POST',
+                  r = subprocess.run(['curl', '-s', '--max-time', '30', '-X', 'POST'] + headers + [
                       '-H', 'Content-Type: application/json',
+                      '-H', 'Origin: https://tgsave.com',
+                      '-H', 'Referer: https://tgsave.com/',
                       '-d', json.dumps({"url": link}),
                       'https://api.tgsave.com/download'], capture_output=True, text=True, timeout=35)
-                  if r.returncode == 0:
+                  if r.returncode == 0 and r.stdout:
                       data = json.loads(r.stdout)
-                      url = data.get('url') or data.get('link')
+                      url = data.get('url') or data.get('link') or data.get('download_url')
                       name = data.get('filename') or data.get('file_name')
-                      if url: return url, name
-              except: pass
+                      size = data.get('size') or data.get('file_size')
+                      if url:
+                          print(f"  ✅ Resolved! Size: {size or 'unknown'}")
+                          return url, name, size
+              except Exception as e:
+                  print(f"  ⚠️ Error: {e}")
 
-              return None, None
+              # Method 3: Direct CDN detection
+              print("  🔍 Trying direct CDN...")
+              try:
+                  r = subprocess.run(['curl', '-sL', '--max-time', '20'] + headers + [link],
+                      capture_output=True, text=True, timeout=25)
+                  if r.returncode == 0:
+                      # Look for CDN links
+                      cdn_patterns = [
+                          r'https://cdn[0-9]*\.telesco\.pe/file/[^"<>\s]+',
+                          r'https://[^"<>\s]*tg[^"<>\s]*\.com/[^"<>\s]+\.(?:mp4|zip|rar|7z|pdf|mp3)[^"<>\s]*',
+                      ]
+                      for pattern in cdn_patterns:
+                          match = re.search(pattern, r.stdout)
+                          if match:
+                              url = match.group(0)
+                              name = urllib.parse.unquote(url.split('/')[-1].split('?')[0])
+                              print(f"  ✅ Found CDN link!")
+                              return url, name, None
+              except Exception as e:
+                  print(f"  ⚠️ Error: {e}")
 
-          def download(url, path):
+              return None, None, None
+
+          def is_valid_file(path, min_size_kb=100):
+              """Check if downloaded file is valid"""
+              if not os.path.exists(path):
+                  return False, "File not found"
+
+              size = os.path.getsize(path)
+              size_kb = size / 1024
+
+              if size_kb < min_size_kb:
+                  return False, f"Too small ({size_kb:.1f} KB)"
+
+              # Check file content
+              try:
+                  with open(path, 'rb') as f:
+                      header = f.read(1024).lower()
+
+                      # Check for HTML error pages
+                      if b'<!doctype' in header or b'<html' in header:
+                          return False, "HTML error page"
+                      if b'{"error"' in header or b'"error":' in header:
+                          return False, "JSON error response"
+                      if b'access denied' in header:
+                          return False, "Access denied"
+                      if b'not found' in header and size_kb < 500:
+                          return False, "Not found error"
+              except:
+                  pass
+
+              # Verify with file command
+              try:
+                  r = subprocess.run(['file', '--mime-type', '-b', path], capture_output=True, text=True, timeout=10)
+                  mime = r.stdout.strip()
+                  if mime in ['text/html', 'text/plain'] and size_kb < 500:
+                      return False, f"Invalid type: {mime}"
+              except:
+                  pass
+
+              return True, "OK"
+
+          def download(url, path, expected_size=None):
               # Clean up any existing aria2 files
               for f in glob.glob(f"{path}*.aria2"):
                   try: os.remove(f)
                   except: pass
 
-              for cmd in [
-                  ['curl', '-L', '-f', '-S', '--max-time', '7200', '-o', path, url],
-                  ['aria2c', '-x4', '-s4', '--max-tries=3', '--timeout=600', '-d', os.path.dirname(path), '-o', os.path.basename(path), url]
-              ]:
+              # Calculate minimum expected size
+              min_kb = 100
+              if expected_size:
                   try:
+                      size_str = str(expected_size).lower()
+                      if 'gb' in size_str:
+                          min_kb = float(re.search(r'[\d.]+', size_str).group()) * 1024 * 1024 * 0.9
+                      elif 'mb' in size_str:
+                          min_kb = float(re.search(r'[\d.]+', size_str).group()) * 1024 * 0.9
+                      elif 'kb' in size_str:
+                          min_kb = float(re.search(r'[\d.]+', size_str).group()) * 0.9
+                  except:
+                      pass
+
+              headers = [
+                  '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                  '-H', 'Accept: */*',
+                  '-H', 'Accept-Encoding: identity',
+                  '-H', 'Referer: https://t.me/'
+              ]
+
+              methods = [
+                  ('curl', ['curl', '-L', '-f', '-S', '--max-time', '7200', '--retry', '3'] + headers + ['-o', path, url]),
+                  ('aria2c', ['aria2c', '-x4', '-s4', '--max-tries=5', '--timeout=600', '--allow-overwrite=true',
+                      f'--user-agent=Mozilla/5.0', '--header=Referer: https://t.me/',
+                      '-d', os.path.dirname(path), '-o', os.path.basename(path), url])
+              ]
+
+              for name, cmd in methods:
+                  print(f"    🔄 Trying {name}...")
+                  try:
+                      if os.path.exists(path):
+                          os.remove(path)
+
                       subprocess.run(cmd, capture_output=True, timeout=7200)
+
                       # Clean aria2 temp files
                       for f in glob.glob(f"{path}*.aria2"):
                           try: os.remove(f)
                           except: pass
+
                       if os.path.exists(path):
-                          size = os.path.getsize(path)
-                          if size > 1024:
-                              with open(path, 'rb') as f:
-                                  if b'<!doctype' not in f.read(512).lower():
-                                      return True
+                          is_valid, reason = is_valid_file(path, min_kb)
+                          if is_valid:
+                              size_mb = os.path.getsize(path) / (1024*1024)
+                              print(f"    ✅ Success! ({size_mb:.1f} MB)")
+                              return True
+                          else:
+                              print(f"    ⚠️ Invalid: {reason}")
                               os.remove(path)
-                  except: pass
+                  except Exception as e:
+                      print(f"    ⚠️ Error: {e}")
+
               return False
 
           results = []
           for idx, link in enumerate(links, 1):
-              print(f"\n[{idx}/{len(links)}] {link[:60]}...")
-              url, name = resolve(link)
+              print(f"\n{'='*50}")
+              print(f"📥 [{idx}/{len(links)}] {link[:60]}...")
+              print(f"{'='*50}")
+
+              url, name, expected_size = resolve(link)
               if not url:
-                  print("  Failed to resolve")
+                  print("  ❌ Failed to resolve link")
                   continue
 
               name = safe_name(name or url.split('/')[-1].split('?')[0] or f"file_{idx}")
@@ -127,16 +242,23 @@ jobs:
               os.makedirs(f"downloads/{folder}", exist_ok=True)
               filepath = f"downloads/{folder}/{name}"
 
-              if download(url, filepath):
+              print(f"  📁 Folder: {folder}")
+              print(f"  📄 File: {name}")
+
+              if download(url, filepath, expected_size):
                   size_mb = os.path.getsize(filepath) / (1024*1024)
-                  print(f"  Downloaded: {name} ({size_mb:.1f} MB)")
                   results.append({'name': name, 'folder': folder, 'link': link, 'size': size_mb})
+                  print(f"  ✅ Downloaded successfully!")
               else:
-                  print("  Download failed")
+                  print(f"  ❌ Download failed")
                   try: os.rmdir(f"downloads/{folder}")
                   except: pass
 
           # Package large files
+          print(f"\n{'='*50}")
+          print(f"📦 Packaging files...")
+          print(f"{'='*50}")
+
           COMPRESSED = {'.zip', '.rar', '.7z', '.gz', '.xz', '.tar'}
           for r in results:
               folder, name = r['folder'], r['name']
@@ -152,41 +274,34 @@ jobs:
               os.chdir(f"downloads/{folder}")
 
               if size_mb > MAX_SIZE_MB:
+                  print(f"  ✂️ Splitting {name} ({size_mb:.1f} MB)...")
                   if ext in COMPRESSED:
-                      # Split existing archive using split command
                       subprocess.run(['split', '-b', f'{MAX_SIZE_MB}m', '-d', '-a', '2', name, f'{base}_part'], capture_output=True)
                       os.remove(name)
                       split_files = sorted([f for f in os.listdir('.') if f.startswith(f'{base}_part')])
                       for i, p in enumerate(split_files):
-                          if i == 0:
-                              new_name = f"{base}{ext}"
-                          else:
-                              new_name = f"{base}-part{i:02d}{ext}"
+                          new_name = f"{base}{ext}" if i == 0 else f"{base}-part{i:02d}{ext}"
                           os.rename(p, new_name)
                           parts.append(new_name)
                   else:
-                      # Create split zip archive using 7z
                       cmd = ['7z', 'a', '-tzip', f'-v{MAX_SIZE_MB}m', '-mx=1']
                       if PASSWORD: cmd += [f'-p{PASSWORD}', '-mhe=on']
                       subprocess.run(cmd + [f'{base}.zip', name], capture_output=True)
                       os.remove(name)
-                      # 7z creates: base.zip.001, base.zip.002, etc.
                       split_files = sorted([f for f in os.listdir('.') if f.startswith(f'{base}.zip.')])
                       for i, p in enumerate(split_files):
-                          if i == 0:
-                              new_name = f"{base}.zip"
-                          else:
-                              new_name = f"{base}-part{i:02d}.zip"
+                          new_name = f"{base}.zip" if i == 0 else f"{base}-part{i:02d}.zip"
                           os.rename(p, new_name)
                           parts.append(new_name)
+                  print(f"  ✅ Split into {len(parts)} parts")
               elif PASSWORD and ext not in COMPRESSED:
+                  print(f"  🔐 Encrypting {name}...")
                   subprocess.run(['7z', 'a', '-tzip', f'-p{PASSWORD}', '-mhe=on', f'{base}.zip', name], capture_output=True)
                   os.remove(name)
                   parts.append(f'{base}.zip')
               else:
                   parts.append(name)
 
-              # Clean any leftover aria2 files
               for f in glob.glob('*.aria2'):
                   try: os.remove(f)
                   except: pass
@@ -195,43 +310,50 @@ jobs:
               r['parts'] = parts
 
           # Generate READMEs
+          print(f"\n📝 Generating README files...")
           for r in results:
               folder = r['folder']
               raw_base = f"https://github.com/{REPO}/raw/refs/heads/{BRANCH}/downloads/{urllib.parse.quote(folder)}"
 
-              lines = [f"# {r['name']}", "", "## Download Links", ""]
+              lines = [f"# 📄 {r['name']}", "", f"📦 **Size:** {r['size']:.1f} MB", "", "## 🔗 Download Links", ""]
               for p in r.get('parts', [r['name']]):
                   url = f"{raw_base}/{urllib.parse.quote(p)}"
-                  lines.append(f"- [{p}]({url})")
+                  lines.append(f"- 📥 [{p}]({url})")
 
               if len(r.get('parts', [])) > 1:
-                  lines += ["", "## Reassemble", "```bash", "# Linux/Mac", f"cat {r['parts'][0].rsplit('.', 1)[0]}*.zip > combined.zip", "# Or use 7z:", "7z x {first_part}", "```"]
+                  lines += ["", "## 🔧 Reassemble", "```bash", "# Linux/Mac:", f"cat {r['parts'][0].rsplit('.', 1)[0]}* > combined.zip", "", "# Or extract directly:", f"7z x {r['parts'][0]}", "```"]
 
-              lines += ["", f"Source: {r['link']}"]
+              lines += ["", f"---", f"📎 Source: [Telegram]({r['link']})"]
 
               with open(f"downloads/{folder}/README.md", 'w') as f:
                   f.write('\n'.join(lines))
 
           # Main README
           with open('downloads/README.md', 'w') as f:
-              f.write("# Downloads\n\n| File | Size | Folder |\n|------|------|--------|\n")
+              f.write("# 📥 Downloads\n\n")
+              f.write("| 📄 File | 📦 Size | 📁 Folder |\n")
+              f.write("|---------|---------|----------|\n")
               for r in results:
                   f.write(f"| {r['name']} | {r['size']:.1f} MB | [{r['folder']}](./{urllib.parse.quote(r['folder'])}) |\n")
 
-          # Final cleanup - remove all aria2 files
+          # Final cleanup
           for f in glob.glob('downloads/**/*.aria2', recursive=True):
               try: os.remove(f)
               except: pass
 
-          print(f"\nCompleted: {len(results)} file(s)")
+          print(f"\n{'='*50}")
+          print(f"✅ Completed: {len(results)} file(s)")
+          print(f"{'='*50}")
           PY
 
-      - name: Push
+      - name: 📤 Push Changes
         run: |
-          # Clean aria2 files before commit
           find downloads -name "*.aria2" -delete 2>/dev/null || true
 
           git add downloads/
-          git diff --staged --quiet && exit 0
-          git commit -m "Download $(git diff --staged --name-only | wc -l) file(s)"
+          git diff --staged --quiet && echo "ℹ️ No changes" && exit 0
+
+          COUNT=$(git diff --staged --name-only | wc -l)
+          git commit -m "📥 Download: $COUNT file(s)"
           git push || (git pull --rebase && git push)
+          echo "✅ Pushed successfully!"
