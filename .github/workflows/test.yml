@@ -420,15 +420,15 @@ jobs:
               sys.exit(1)
           PYEOF
 
-      - name: 📦 Package Files as Standard ZIP
+      - name: 📦 Package Files (Handle Large Files)
         id: package
         run: |
           python3 << 'PYEOF'
           import os, subprocess, json, glob, shutil
 
           ZIP_PASSWORD = """${{ github.event.inputs.password }}"""
-          # GitHub has a 100MB file size limit, use 95MB to be safe
-          MAX_ZIP_SIZE_MB = 95
+          # GitHub has a 100MB file size limit, use 90MB to be safe
+          MAX_FILE_SIZE_MB = 90
 
           # Ensure downloads folder exists
           os.makedirs('downloads', exist_ok=True)
@@ -467,69 +467,81 @@ jobs:
               print(f"📦 Processing: {folder_name}/{filename} ({size_mb:.2f} MB)")
 
               base_name = os.path.splitext(filename)[0]
+              ext = os.path.splitext(filename)[1].lower()
 
-              # Case A: Large file needs splitting into multiple ZIPs
-              if size_mb > MAX_ZIP_SIZE_MB:
-                  print(f"✂️ File is larger than {MAX_ZIP_SIZE_MB}MB, splitting into multiple ZIP files...")
+              # Case A: Large file needs splitting - use ZIP split archive
+              if size_mb > MAX_FILE_SIZE_MB:
+                  print(f"✂️ File is larger than {MAX_FILE_SIZE_MB}MB, creating split ZIP archive...")
 
-                  # Calculate number of parts needed
-                  split_size_bytes = MAX_ZIP_SIZE_MB * 1024 * 1024
-                  num_parts = int(size / split_size_bytes) + 1
+                  zip_base = os.path.join(folder_path, base_name)
 
-                  # Split the file first
-                  print(f"📄 Splitting file into {num_parts} parts...")
-                  split_prefix = os.path.join(folder_path, f'{base_name}_part_')
-                  result = subprocess.run([
-                      'split', '-b', f'{MAX_ZIP_SIZE_MB}m', '-d', '--suffix-length=3',
-                      filepath, split_prefix
-                  ], capture_output=True, text=True)
+                  # Use zip -s to create proper split archive
+                  # This creates: base.z01, base.z02, ..., base.zip
+                  if ZIP_PASSWORD:
+                      cmd = ['zip', '-r', '-s', f'{MAX_FILE_SIZE_MB}m', '-P', ZIP_PASSWORD, f'{zip_base}.zip', filepath]
+                  else:
+                      cmd = ['zip', '-r', '-s', f'{MAX_FILE_SIZE_MB}m', f'{zip_base}.zip', filepath]
+
+                  # Change to folder to avoid path issues in archive
+                  original_dir = os.getcwd()
+                  os.chdir(folder_path)
+
+                  if ZIP_PASSWORD:
+                      cmd = ['zip', '-s', f'{MAX_FILE_SIZE_MB}m', '-P', ZIP_PASSWORD, f'{base_name}.zip', filename]
+                  else:
+                      cmd = ['zip', '-s', f'{MAX_FILE_SIZE_MB}m', f'{base_name}.zip', filename]
+
+                  result = subprocess.run(cmd, capture_output=True, text=True)
+                  os.chdir(original_dir)
 
                   if result.returncode == 0:
                       # Remove original file
                       os.remove(filepath)
 
-                      # Create ZIP for each part
-                      part_files = sorted(glob.glob(f'{split_prefix}*'))
-                      for i, part_file in enumerate(part_files, 1):
-                          part_basename = os.path.basename(part_file)
-                          zip_name = f'{base_name}_part{i:03d}.zip'
-                          zip_path = os.path.join(folder_path, zip_name)
+                      # Find all parts: .z01, .z02, ... and .zip
+                      zip_parts = sorted(glob.glob(os.path.join(folder_path, f'{base_name}.z[0-9]*')))
+                      main_zip = os.path.join(folder_path, f'{base_name}.zip')
 
-                          # Create ZIP (with or without password)
-                          if ZIP_PASSWORD:
-                              cmd = ['zip', '-j', '-P', ZIP_PASSWORD, zip_path, part_file]
-                          else:
-                              cmd = ['zip', '-j', zip_path, part_file]
+                      # Add split parts first (.z01, .z02, etc.)
+                      for part_path in zip_parts:
+                          part_name = os.path.basename(part_path)
+                          part_size = os.path.getsize(part_path) / (1024 * 1024)
+                          entry['parts'].append({
+                              'name': part_name,
+                              'size_mb': round(part_size, 2)
+                          })
+                          print(f"  ✅ Created: {part_name} ({part_size:.2f} MB)")
 
-                          subprocess.run(cmd, capture_output=True)
+                      # Add main .zip file last
+                      if os.path.exists(main_zip):
+                          zip_size = os.path.getsize(main_zip) / (1024 * 1024)
+                          entry['parts'].append({
+                              'name': f'{base_name}.zip',
+                              'size_mb': round(zip_size, 2)
+                          })
+                          print(f"  ✅ Created: {base_name}.zip ({zip_size:.2f} MB)")
 
-                          # Remove the split part file
-                          os.remove(part_file)
-
-                          if os.path.exists(zip_path):
-                              zip_size = os.path.getsize(zip_path) / (1024 * 1024)
-                              entry['parts'].append({
-                                  'name': zip_name,
-                                  'size_mb': round(zip_size, 2)
-                              })
-                              print(f"  ✅ Created: {zip_name} ({zip_size:.2f} MB)")
-
-                      print(f"✅ Created {len(entry['parts'])} ZIP parts")
-                      print(f"💡 To extract: Unzip all parts in order, then combine with: cat {base_name}_part* > {filename}")
+                      print(f"✅ Created {len(entry['parts'])} part split archive")
+                      print(f"💡 To extract: Download ALL parts to same folder, then extract the .zip file")
                   else:
-                      print(f"⚠️ Split failed, keeping original file")
+                      print(f"⚠️ ZIP split failed: {result.stderr}")
+                      print(f"Keeping original file")
                       entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
 
-              # Case B: File fits in single ZIP with password
+              # Case B: Password requested - create password-protected ZIP
               elif ZIP_PASSWORD:
                   print(f"🔐 Creating password-protected ZIP...")
                   zip_name = f'{base_name}.zip'
-                  zip_path = os.path.join(folder_path, zip_name)
 
-                  cmd = ['zip', '-j', '-P', ZIP_PASSWORD, zip_path, filepath]
+                  original_dir = os.getcwd()
+                  os.chdir(folder_path)
+
+                  cmd = ['zip', '-P', ZIP_PASSWORD, zip_name, filename]
                   result = subprocess.run(cmd, capture_output=True, text=True)
+                  os.chdir(original_dir)
 
-                  if result.returncode == 0:
+                  zip_path = os.path.join(folder_path, zip_name)
+                  if result.returncode == 0 and os.path.exists(zip_path):
                       os.remove(filepath)
                       zip_size = os.path.getsize(zip_path) / (1024 * 1024)
                       entry['parts'].append({'name': zip_name, 'size_mb': round(zip_size, 2)})
@@ -538,30 +550,10 @@ jobs:
                       print(f"⚠️ ZIP failed, keeping original")
                       entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
 
-              # Case C: Small file, no password - keep as-is or create simple ZIP
+              # Case C: Small file, no password - KEEP AS-IS (no unnecessary zipping!)
               else:
-                  # Check if file is already a common archive format
-                  ext = os.path.splitext(filename)[1].lower()
-                  if ext in ['.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2']:
-                      print(f"📄 File is already an archive, keeping as-is")
-                      entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
-                  else:
-                      # Create a simple ZIP for easy extraction
-                      print(f"📦 Creating standard ZIP archive...")
-                      zip_name = f'{base_name}.zip'
-                      zip_path = os.path.join(folder_path, zip_name)
-
-                      cmd = ['zip', '-j', zip_path, filepath]
-                      result = subprocess.run(cmd, capture_output=True, text=True)
-
-                      if result.returncode == 0:
-                          os.remove(filepath)
-                          zip_size = os.path.getsize(zip_path) / (1024 * 1024)
-                          entry['parts'].append({'name': zip_name, 'size_mb': round(zip_size, 2)})
-                          print(f"✅ Created: {zip_name} ({zip_size:.2f} MB)")
-                      else:
-                          print(f"⚠️ ZIP failed, keeping original")
-                          entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
+                  print(f"📄 File is under {MAX_FILE_SIZE_MB}MB, keeping original format")
+                  entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
 
               packaged_files.append(entry)
 
@@ -662,7 +654,11 @@ jobs:
               if status == 'success' and parts:
                   lines.append("## 📥 Download Links\n")
 
-                  if len(parts) > 1:
+                  # Check if this is a split archive (has .z01, .z02, etc.)
+                  has_split_parts = any(p['name'].endswith(('.z01', '.z02', '.z03', '.z04', '.z05')) for p in parts)
+
+                  if has_split_parts:
+                      # Split ZIP archive
                       lines.append(f"This file has been split into **{len(parts)} parts** due to size limitations.\n")
                       lines.append("| # | File | Size | Download |")
                       lines.append("|---|------|------|----------|")
@@ -674,10 +670,20 @@ jobs:
                           lines.append(f"| {i} | `{part_name}` | {part_size} MB | [⬇️ Download]({url}) |")
                       lines.append("")
                       lines.append("### 📋 How to Extract\n")
-                      lines.append("1. Download all parts above")
-                      lines.append("2. Extract each ZIP file using any ZIP tool (WinRAR, 7-Zip, File Explorer, Ark)")
-                      lines.append("3. Combine the extracted parts: `cat *_part* > original_file`")
-                  else:
+                      lines.append("**IMPORTANT:** Download ALL parts to the SAME folder before extracting!\n")
+                      lines.append("#### Windows:")
+                      lines.append("1. Download all files (.z01, .z02, ... and .zip) to the same folder")
+                      lines.append("2. Right-click the `.zip` file → **Extract with WinRAR** or **7-Zip → Extract Here**")
+                      lines.append("3. The tool will automatically find and use all parts\n")
+                      lines.append("#### macOS:")
+                      lines.append("1. Download all parts to the same folder")
+                      lines.append("2. Open Terminal and run: `zip -s 0 filename.zip --out combined.zip && unzip combined.zip`\n")
+                      lines.append("#### Linux:")
+                      lines.append("1. Download all parts to the same folder")
+                      lines.append("2. Run: `zip -s 0 filename.zip --out combined.zip && unzip combined.zip`")
+                      lines.append("3. Or use Ark/File Roller - open the .zip file and it will find the parts")
+                  elif len(parts) == 1:
+                      # Single file
                       part = parts[0]
                       part_name = part['name']
                       part_size = part['size_mb']
@@ -688,12 +694,29 @@ jobs:
                       lines.append(f"|------|------|----------|")
                       lines.append(f"| `{part_name}` | {part_size} MB | [⬇️ Download]({url}) |")
                       lines.append("")
+
+                      # Check file type for appropriate instructions
                       if part_name.endswith('.zip'):
                           lines.append("### 📋 How to Extract\n")
-                          lines.append("Simply right-click the ZIP file and extract using any tool:")
+                          lines.append("Simply right-click the ZIP file and extract:")
                           lines.append("- **Windows**: Right-click → Extract All, or use WinRAR/7-Zip")
                           lines.append("- **macOS**: Double-click the ZIP file")
-                          lines.append("- **Linux**: Right-click → Extract Here, or use `unzip` command")
+                          lines.append("- **Linux**: Right-click → Extract Here, or run `unzip filename.zip`")
+                      else:
+                          # Regular file (MP3, MP4, PDF, etc.) - no extraction needed
+                          lines.append("### 📋 How to Use\n")
+                          lines.append("This file is ready to use! No extraction needed.")
+                          lines.append("Simply download and open with your preferred application.")
+                  else:
+                      # Multiple parts but not split archive format
+                      lines.append("| # | File | Size | Download |")
+                      lines.append("|---|------|------|----------|")
+                      for i, part in enumerate(parts, 1):
+                          part_name = part['name']
+                          part_size = part['size_mb']
+                          encoded = quote(part_name, safe='')
+                          url = f"{raw_base}/{encoded}"
+                          lines.append(f"| {i} | `{part_name}` | {part_size} MB | [⬇️ Download]({url}) |")
 
               lines.append("\n---\n")
               lines.append(f"*Generated by GitHub Actions Telegram Downloader*")
@@ -743,6 +766,13 @@ jobs:
           successful = [f for f in packaged_files if f.get('status', 'success') == 'success']
           failed = [f for f in packaged_files if f.get('status') == 'failed']
 
+          # Check if any files are split archives
+          has_any_split = False
+          for f in successful:
+              if any(p['name'].endswith(('.z01', '.z02', '.z03')) for p in f.get('parts', [])):
+                  has_any_split = True
+                  break
+
           lines = []
           lines.append("# 📥 Downloaded Telegram Files\n")
           lines.append(f"**Last Updated:** {today} at {time_now}\n")
@@ -765,18 +795,20 @@ jobs:
           # File listings - Successful
           if successful:
               lines.append("## ✅ Downloaded Files\n")
-              lines.append("| # | File | Size | Folder |")
-              lines.append("|---|------|------|--------|")
+              lines.append("| # | File | Size | Parts | Folder |")
+              lines.append("|---|------|------|-------|--------|")
 
               for idx, file_info in enumerate(successful, 1):
                   original_name = file_info['original_name']
                   folder_name = file_info['folder_name']
                   size_mb = file_info['size_mb']
+                  parts = file_info.get('parts', [])
+                  num_parts = len(parts)
 
                   # Link to folder README
                   folder_link = f"./{quote(folder_name, safe='')}"
 
-                  lines.append(f"| {idx} | {original_name} | {size_mb} MB | [📁 {folder_name}]({folder_link}) |")
+                  lines.append(f"| {idx} | {original_name} | {size_mb} MB | {num_parts} | [📁 {folder_name}]({folder_link}) |")
 
               lines.append("\n---\n")
 
@@ -802,14 +834,26 @@ jobs:
 
           # How to use section
           lines.append("## 📋 How to Use\n")
-          lines.append("1. Click on any folder link above to see the file details")
-          lines.append("2. Each folder contains a `README.md` with download links and extraction instructions")
-          lines.append("3. Download the file(s) and extract using any ZIP tool\n")
-          lines.append("### Supported Extraction Tools\n")
-          lines.append("- **Windows**: File Explorer (built-in), WinRAR, 7-Zip")
-          lines.append("- **macOS**: Archive Utility (built-in), The Unarchiver")
-          lines.append("- **Linux**: File Manager (built-in), Ark, `unzip` command\n")
-          lines.append("---\n")
+          lines.append("1. Click on any folder link above to see the file details and download links")
+          lines.append("2. Each folder contains a `README.md` with download instructions")
+          lines.append("3. Download the file(s) and use them!\n")
+
+          # Add split archive instructions if any exist
+          if has_any_split:
+              lines.append("### ⚠️ Large Files (Split Archives)\n")
+              lines.append("Some files were split into multiple parts due to size limits.")
+              lines.append("For these files:\n")
+              lines.append("1. Download **ALL** parts (`.z01`, `.z02`, ... and `.zip`) to the **same folder**")
+              lines.append("2. Extract the `.zip` file using WinRAR or 7-Zip")
+              lines.append("3. The tool will automatically combine all parts\n")
+
+          lines.append("### Supported Tools\n")
+          lines.append("| Platform | Tools |")
+          lines.append("|----------|-------|")
+          lines.append("| **Windows** | File Explorer, WinRAR, 7-Zip |")
+          lines.append("| **macOS** | Archive Utility, The Unarchiver, Keka |")
+          lines.append("| **Linux** | File Manager, Ark, `unzip` command |")
+          lines.append("\n---\n")
           lines.append("*Generated by GitHub Actions Telegram Downloader*")
 
           content = "\n".join(lines)
@@ -907,7 +951,34 @@ jobs:
               lines.append(f"| **Parts** | {len(parts)} |")
               lines.append("")
 
-              if len(parts) > 1:
+              # Check if this is a split archive
+              has_split_parts = any(p['name'].endswith(('.z01', '.z02', '.z03', '.z04', '.z05')) for p in parts)
+
+              if has_split_parts:
+                  lines.append("**📦 Download Parts (Split Archive):**\n")
+                  lines.append("| # | File | Size | Link |")
+                  lines.append("|---|------|------|------|")
+                  for i, part in enumerate(parts, 1):
+                      part_name = part['name']
+                      part_size = part['size_mb']
+                      encoded = quote(part_name, safe='')
+                      url = f"{raw_base}/{encoded}"
+                      lines.append(f"| {i} | `{part_name}` | {part_size} MB | [⬇️ Download]({url}) |")
+                  lines.append("")
+                  lines.append("> 💡 **To extract:** Download ALL parts to the same folder. Then extract the `.zip` file with WinRAR, 7-Zip, or any ZIP tool. All parts must be present. On macOS/Linux, you can run: `zip -s 0 filename.zip --out combined.zip && unzip combined.zip`.\n")
+              elif len(parts) == 1:
+                  part = parts[0]
+                  part_name = part['name']
+                  part_size = part['size_mb']
+                  encoded = quote(part_name, safe='')
+                  url = f"{raw_base}/{encoded}"
+                  lines.append(f"**📥 Download:** [**{part_name}**]({url}) ({part_size} MB)\n")
+
+                  if part_name.endswith('.zip'):
+                      lines.append("> 💡 **To extract:** Right-click and extract with any ZIP tool (WinRAR, 7-Zip, File Explorer, Ark)\n")
+                  else:
+                      lines.append("> 💡 **Ready to use:** No extraction needed - just download and open!\n")
+              else:
                   lines.append("**📦 Download Parts:**\n")
                   lines.append("| # | File | Size | Link |")
                   lines.append("|---|------|------|------|")
@@ -918,16 +989,6 @@ jobs:
                       url = f"{raw_base}/{encoded}"
                       lines.append(f"| {i} | `{part_name}` | {part_size} MB | [⬇️ Download]({url}) |")
                   lines.append("")
-                  lines.append("> 💡 **To extract:** Download all ZIP parts. Each part can be extracted individually with any ZIP tool (WinRAR, 7-Zip, File Explorer, Ark, etc.)\n")
-              else:
-                  part = parts[0]
-                  part_name = part['name']
-                  part_size = part['size_mb']
-                  encoded = quote(part_name, safe='')
-                  url = f"{raw_base}/{encoded}"
-                  lines.append(f"**📥 Download:** [**{part_name}**]({url}) ({part_size} MB)\n")
-                  if part_name.endswith('.zip'):
-                      lines.append("> 💡 **To extract:** Simply right-click and extract with any ZIP tool (WinRAR, 7-Zip, File Explorer, Ark, etc.)\n")
 
               lines.append("---\n")
 
