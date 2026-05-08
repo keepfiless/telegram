@@ -26,7 +26,7 @@ jobs:
       - name: ⚙️ Setup
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 p7zip-full file zip
+          sudo apt-get install -y -qq aria2 p7zip-full file zip wget
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           mkdir -p downloads
@@ -189,19 +189,22 @@ jobs:
                       pass
 
               headers = [
-                  '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                  '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                   '-H', 'Accept: */*',
-                  '-H', 'Referer: https://t.me/'
+                  '-H', 'Accept-Language: en-US,en;q=0.9',
+                  '-H', 'Connection: keep-alive'
               ]
 
               methods = [
                   ('curl', ['curl', '-L', '-f', '-S', '--max-time', '7200', '--retry', '5',
-                      '--retry-delay', '5', '--retry-max-time', '3600'] + headers + ['-o', path, url]),
+                      '--retry-delay', '5', '--retry-max-time', '3600', '--progress-bar'] + headers + ['-o', path, url]),
+                  ('wget', ['wget', '-q', '--show-progress', '-O', path, '--timeout=600', '--tries=5',
+                      '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                      url]),
                   ('aria2c', ['aria2c', '-x4', '-s4', '-k1M', '--max-tries=10', '--retry-wait=5',
                       '--timeout=600', '--connect-timeout=60', '--allow-overwrite=true',
                       '--file-allocation=none', '--continue=true', '--auto-file-renaming=false',
-                      '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                      '--header=Referer: https://t.me/',
+                      '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                       '-d', os.path.dirname(path), '-o', os.path.basename(path), url])
               ]
 
@@ -243,34 +246,51 @@ jobs:
               print(f"📥 [{idx}/{len(links)}] {link[:60]}...")
               print(f"{'='*50}")
 
-              url, name, expected_size = resolve(link)
-              if not url:
-                  print("  ❌ Failed to resolve")
-                  continue
+              # Try up to 3 times with fresh URL resolution each time
+              success = False
+              name = None
+              folder = None
+              filepath = None
 
-              name = safe_name(name or url.split('/')[-1].split('?')[0] or f"file_{idx}")
-              folder = os.path.splitext(name)[0]
+              for attempt in range(1, 4):
+                  if attempt > 1:
+                      print(f"\n  🔄 Retry attempt {attempt}/3 - getting fresh download URL...")
 
-              base_folder = folder
-              counter = 1
-              while os.path.exists(f"downloads/{folder}"):
-                  folder = f"{base_folder}_{counter}"
-                  counter += 1
+                  url, resolved_name, expected_size = resolve(link)
+                  if not url:
+                      print("  ❌ Failed to resolve")
+                      continue
 
-              os.makedirs(f"downloads/{folder}", exist_ok=True)
-              filepath = f"downloads/{folder}/{name}"
+                  print(f"  🔗 Download URL: {url[:100]}...")
 
-              print(f"  📁 Folder: {folder}")
-              print(f"  📄 File: {name}")
+                  if name is None:
+                      name = safe_name(resolved_name or url.split('/')[-1].split('?')[0] or f"file_{idx}")
+                      folder = os.path.splitext(name)[0]
 
-              if download(url, filepath, expected_size):
-                  size_mb = os.path.getsize(filepath) / (1024*1024)
-                  results.append({'name': name, 'folder': folder, 'link': link, 'size': size_mb})
-                  print(f"  ✅ Downloaded!")
-              else:
-                  print(f"  ❌ Failed")
-                  try: os.rmdir(f"downloads/{folder}")
-                  except: pass
+                      base_folder = folder
+                      counter = 1
+                      while os.path.exists(f"downloads/{folder}"):
+                          folder = f"{base_folder}_{counter}"
+                          counter += 1
+
+                      os.makedirs(f"downloads/{folder}", exist_ok=True)
+                      filepath = f"downloads/{folder}/{name}"
+
+                      print(f"  📁 Folder: {folder}")
+                      print(f"  📄 File: {name}")
+
+                  if download(url, filepath, expected_size):
+                      size_mb = os.path.getsize(filepath) / (1024*1024)
+                      results.append({'name': name, 'folder': folder, 'link': link, 'size': size_mb})
+                      print(f"  ✅ Downloaded!")
+                      success = True
+                      break
+
+              if not success:
+                  print(f"  ❌ Failed after 3 attempts")
+                  if folder:
+                      try: os.rmdir(f"downloads/{folder}")
+                      except: pass
 
           # Package large files
           print(f"\n{'='*50}")
