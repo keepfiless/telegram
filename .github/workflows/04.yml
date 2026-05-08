@@ -1,0 +1,32 @@
+name: 04- Download Telegram Post
+on: workflow_dispatch
+  inputs:
+    telegram_link:
+      description: 'Telegram post link'
+      required: true
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: pip install beautifulsoup4 html2text requests
+      
+      - name: Download script
+        run: wget https://raw.githubusercontent.com/Steelio/Telegram-Post-Scraper/main/main.py
+      
+      - name: Scrape & Download
+        run: python main.py -l ${{ github.event.inputs.telegram_link }}
+      
+      - name: Commit files
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add .
+          git commit -m "Downloaded from ${{ github.event.inputs.telegram_link }}"
+          git push
