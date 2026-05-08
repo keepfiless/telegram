@@ -6,7 +6,7 @@ from urllib.parse import urlparse, unquote
 from bs4 import BeautifulSoup
 
 def download_telegram_post(post_url):
-    """Download media and text from a Telegram post"""
+    """Download media and text from a SPECIFIC Telegram post only"""
 
     # Convert to preview URL
     if '/s/' not in post_url:
@@ -35,24 +35,44 @@ def download_telegram_post(post_url):
         channel_name = "telegram"
         post_id = "post"
 
-    # Create folder
-    folder = f"{channel_name}_{post_id}"
+    # Create folder structure: downloads/channel_name/post_id/
+    folder = os.path.join("downloads", channel_name, post_id)
     os.makedirs(folder, exist_ok=True)
     print(f"[+] Saving to folder: {folder}/")
 
-    # Extract text content
-    text_div = soup.find('div', class_='tgme_widget_message_text')
+    # Find the SPECIFIC post message div (not all posts on page!)
+    # This ensures we only get files from THIS post
+    post_div = soup.find('div', {'class': 'tgme_widget_message', 'data-post': f"{channel_name}/{post_id}"})
+
+    if not post_div:
+        # Fallback: try to find the message by looking for the post link
+        all_messages = soup.find_all('div', class_='tgme_widget_message')
+        for msg in all_messages:
+            msg_link = msg.find('a', class_='tgme_widget_message_date')
+            if msg_link and post_id in msg_link.get('href', ''):
+                post_div = msg
+                break
+
+    if not post_div:
+        print("[-] Could not find the specific post on the page")
+        print("[!] Trying to download from entire page (may get extra files)")
+        post_div = soup
+    else:
+        print(f"[+] Found specific post #{post_id}")
+
+    # Extract text content from THIS post only
+    text_div = post_div.find('div', class_='tgme_widget_message_text')
     if text_div:
         text = text_div.get_text(strip=True)
         with open(f"{folder}/post_text.txt", 'w', encoding='utf-8') as f:
             f.write(text)
         print(f"[+] Saved text content")
 
-    # Find all media elements
+    # Find media elements ONLY in this specific post
     downloaded_count = 0
 
-    # Try to find video
-    video = soup.find('video')
+    # Try to find video in THIS post
+    video = post_div.find('video')
     if video and video.get('src'):
         video_url = video['src']
         if not video_url.startswith('http'):
@@ -62,8 +82,8 @@ def download_telegram_post(post_url):
             downloaded_count += 1
             print(f"[+] Downloaded video: {filename}")
 
-    # Try to find images
-    images = soup.find_all('a', class_='tgme_widget_message_photo_wrap')
+    # Try to find images in THIS post
+    images = post_div.find_all('a', class_='tgme_widget_message_photo_wrap')
     for idx, img in enumerate(images):
         style = img.get('style', '')
         match = re.search(r"url\('([^']+)'\)", style)
@@ -74,8 +94,8 @@ def download_telegram_post(post_url):
                 downloaded_count += 1
                 print(f"[+] Downloaded image: {filename}")
 
-    # Try to find document/file downloads
-    documents = soup.find_all('a', class_='tgme_widget_message_document_wrap')
+    # Try to find document/file downloads in THIS post
+    documents = post_div.find_all('a', class_='tgme_widget_message_document_wrap')
     for idx, doc in enumerate(documents):
         doc_link = doc.get('href')
         if doc_link:
@@ -91,27 +111,8 @@ def download_telegram_post(post_url):
                 downloaded_count += 1
                 print(f"[+] Downloaded document: {downloaded_file}")
 
-    # Try alternative: look for direct download links
-    download_links = soup.find_all('a', href=re.compile(r'https://[^"]*\.(mp3|mp4|zip|pdf|rar|7z|doc|docx|xls|xlsx|ppt|pptx)'))
-    for link in download_links:
-        url = link['href']
-        filename = os.path.basename(urlparse(url).path)
-        filename = unquote(filename)
-        downloaded_file = download_file(url, folder, filename)
-        if downloaded_file:
-            downloaded_count += 1
-            print(f"[+] Downloaded file: {downloaded_file}")
-
-    # Try to find any iframe or embed with file
-    iframes = soup.find_all('iframe')
-    for iframe in iframes:
-        src = iframe.get('src')
-        if src and any(ext in src for ext in ['.mp3', '.mp4', '.zip', '.pdf']):
-            filename = os.path.basename(urlparse(src).path)
-            downloaded_file = download_file(src, folder, filename)
-            if downloaded_file:
-                downloaded_count += 1
-                print(f"[+] Downloaded from iframe: {downloaded_file}")
+    if downloaded_count == 0:
+        print("[!] No media files found in this post")
 
     print(f"\n[✓] Complete! Downloaded {downloaded_count} file(s) to {folder}/")
     return folder
