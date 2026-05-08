@@ -1,6 +1,6 @@
 # 📥 Telegram Downloads
 
-**Generated:** 2026-05-08 at 02:01:01
+**Generated:** 2026-05-08 at 02:03:42
 
 ---
 
@@ -21,11 +21,11 @@
 |----------|-------|
 | **Status** | ✅ 100% Downloaded |
 | **Source** | [Telegram Link](https://t.me/avasam_edu/966) |
-| **Folder** | `02-linux-for-programmers-rendered-optmized_copy2` |
+| **Folder** | `02-linux-for-programmers-rendered-optmized` |
 | **Size** | 0.06 MB |
 | **Parts** | 1 |
 
-**📥 Download:** [**02-linux-for-programmers-rendered-optmized.zip**](https://github.com/keepfiless/telegram/raw/refs/heads/main/downloads/02-linux-for-programmers-rendered-optmized_copy2/02-linux-for-programmers-rendered-optmized.zip) (0.06 MB)
+**📥 Download:** [**02-linux-for-programmers-rendered-optmized.zip**](https://github.com/keepfiless/telegram/raw/refs/heads/main/downloads/02-linux-for-programmers-rendered-optmized/02-linux-for-programmers-rendered-optmized.zip) (0.06 MB)
 
 > 💡 **To extract:** Use 7-Zip, WinRAR, or your system's archive tool.
 
