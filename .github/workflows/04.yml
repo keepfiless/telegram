@@ -23,7 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install beautifulsoup4==4.11.1 html2text==2020.1.16 requests==2.28.2
+          pip install beautifulsoup4==4.11.1 html2text==2020.1.16 pyperclip==1.8.2 requests==2.28.2
 
       - name: Download Telegram scraper
         run: |
