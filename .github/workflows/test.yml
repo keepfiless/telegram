@@ -510,13 +510,14 @@ jobs:
                           print(f"✅ Split into {len(entry['parts'])} parts")
 
                           # Create a reassembly script
+                          extract_hint = f'echo "You can now extract with: unzip {filename}"' if ext == '.zip' else ''
                           script_content = f"""#!/bin/bash
 # Reassemble {filename}
 # Run this script in the same folder as all the .part files
 
 cat {filename}.*.part > {filename}
-echo "✅ Reassembled: {filename}"
-echo "You can now extract with: unzip {filename}" if ext == '.zip' else ""
+echo "Reassembled: {filename}"
+{extract_hint}
 """
                           with open('reassemble.sh', 'w') as f:
                               f.write(script_content)
