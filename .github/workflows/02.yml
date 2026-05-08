@@ -195,14 +195,14 @@ jobs:
               ]
 
               methods = [
-                  ('aria2c', ['aria2c', '-x16', '-s16', '-k1M', '--max-tries=10', '--retry-wait=5',
+                  ('curl', ['curl', '-L', '-f', '-S', '--max-time', '7200', '--retry', '5',
+                      '--retry-delay', '5', '--retry-max-time', '3600'] + headers + ['-o', path, url]),
+                  ('aria2c', ['aria2c', '-x4', '-s4', '-k1M', '--max-tries=10', '--retry-wait=5',
                       '--timeout=600', '--connect-timeout=60', '--allow-overwrite=true',
                       '--file-allocation=none', '--continue=true', '--auto-file-renaming=false',
                       '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                       '--header=Referer: https://t.me/',
-                      '-d', os.path.dirname(path), '-o', os.path.basename(path), url]),
-                  ('curl', ['curl', '-L', '-f', '-S', '-C', '-', '--max-time', '7200', '--retry', '5',
-                      '--retry-delay', '5', '--retry-max-time', '3600'] + headers + ['-o', path, url])
+                      '-d', os.path.dirname(path), '-o', os.path.basename(path), url])
               ]
 
               for name, cmd in methods:
@@ -214,6 +214,12 @@ jobs:
                           try: os.remove(f)
                           except: pass
 
+                      # Print errors if download tool reported issues
+                      if result.returncode != 0:
+                          stderr_msg = result.stderr.strip()[:500] if result.stderr else ''
+                          if stderr_msg:
+                              print(f"    ⚠️ {name} error: {stderr_msg}")
+
                       if os.path.exists(path):
                           is_valid, reason = is_valid_file(path, min_kb, expected_bytes)
                           if is_valid:
@@ -224,8 +230,9 @@ jobs:
                               print(f"    ⚠️ Invalid: {reason}")
                               if "Incomplete" in reason:
                                   print(f"    🔄 Retrying with different method...")
-                              else:
-                                  os.remove(path)
+                              os.remove(path)
+                      else:
+                          print(f"    ⚠️ {name} failed: No file created")
                   except Exception as e:
                       print(f"    ⚠️ Error: {e}")
               return False
