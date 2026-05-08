@@ -53,6 +53,11 @@ jobs:
           jq --version
           zip --version | head -2
 
+      - name: 📁 Ensure downloads folder exists
+        run: |
+          mkdir -p downloads
+          echo "✅ Downloads folder ready"
+
       - name: 📋 Parse & Resolve Multiple Links
         id: resolve
         run: |
@@ -329,6 +334,7 @@ jobs:
               print("❌ No files to download!")
               sys.exit(1)
 
+          # Ensure downloads folder exists
           os.makedirs('downloads', exist_ok=True)
 
           downloaded_files = []
@@ -374,16 +380,17 @@ jobs:
                       'original_name': original_name,
                       'telegram_link': telegram_link,
                       'size_bytes': size,
-                      'size_mb': round(size_mb, 2)
+                      'size_mb': round(size_mb, 2),
+                      'status': 'success'
                   })
               else:
                   print(f"❌ All download methods failed for: {original_name}")
-                  # Remove empty folder if download failed
-                  if os.path.exists(folder_path) and not os.listdir(folder_path):
-                      os.rmdir(folder_path)
+                  # Keep the folder for failed downloads to track them
                   failed_downloads.append({
                       'original_name': original_name,
-                      'telegram_link': telegram_link
+                      'folder_name': folder_name,
+                      'telegram_link': telegram_link,
+                      'status': 'failed'
                   })
 
           # Final cleanup: remove any .aria2 files that might have been left behind
@@ -423,6 +430,9 @@ jobs:
           # GitHub has a 100MB file size limit, use 95MB to be safe
           MAX_ZIP_SIZE_MB = 95
 
+          # Ensure downloads folder exists
+          os.makedirs('downloads', exist_ok=True)
+
           with open('/tmp/downloaded_files.json', 'r') as f:
               downloaded_files = json.load(f)
 
@@ -449,6 +459,7 @@ jobs:
                   'telegram_link': file_info['telegram_link'],
                   'folder_name': folder_name,
                   'size_mb': round(size_mb, 2),
+                  'status': 'success',
                   'parts': []
               }
 
@@ -554,6 +565,22 @@ jobs:
 
               packaged_files.append(entry)
 
+          # Add failed downloads to packaged_files for README generation
+          try:
+              with open('/tmp/failed_downloads.json', 'r') as f:
+                  failed_downloads = json.load(f)
+                  for failed in failed_downloads:
+                      packaged_files.append({
+                          'original_name': failed['original_name'],
+                          'telegram_link': failed['telegram_link'],
+                          'folder_name': failed.get('folder_name', 'unknown'),
+                          'size_mb': 0,
+                          'status': 'failed',
+                          'parts': []
+                      })
+          except:
+              pass
+
           with open('/tmp/packaged_files.json', 'w') as f:
               json.dump(packaged_files, f)
 
@@ -570,6 +597,240 @@ jobs:
                           print(f"      • {f} ({fsize:.2f} MB)")
           PYEOF
 
+      - name: 📝 Generate README files for each folder
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+          from datetime import datetime
+          from urllib.parse import quote
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          branch = os.environ['GITHUB_REF_NAME']
+
+          # Ensure downloads folder exists
+          os.makedirs('downloads', exist_ok=True)
+
+          with open('/tmp/packaged_files.json', 'r') as f:
+              packaged_files = json.load(f)
+
+          today = datetime.now().strftime('%Y-%m-%d')
+          time_now = datetime.now().strftime('%H:%M:%S')
+
+          # Generate README.md for each folder
+          for file_info in packaged_files:
+              folder_name = file_info['folder_name']
+              folder_path = os.path.join('downloads', folder_name)
+
+              # Create folder if it doesn't exist (for failed downloads)
+              os.makedirs(folder_path, exist_ok=True)
+
+              original_name = file_info['original_name']
+              telegram_link = file_info['telegram_link']
+              size_mb = file_info['size_mb']
+              status = file_info.get('status', 'success')
+              parts = file_info.get('parts', [])
+
+              raw_base = f"https://github.com/{repo}/raw/refs/heads/{branch}/downloads/{quote(folder_name, safe='')}"
+
+              lines = []
+              lines.append(f"# 📄 {original_name}\n")
+              lines.append(f"**Downloaded:** {today} at {time_now}\n")
+              lines.append("---\n")
+
+              # Status section
+              lines.append("## 📊 Status\n")
+              if status == 'success':
+                  lines.append("| Property | Value |")
+                  lines.append("|----------|-------|")
+                  lines.append(f"| **Status** | ✅ 100% Downloaded |")
+                  lines.append(f"| **Original Name** | `{original_name}` |")
+                  lines.append(f"| **Size** | {size_mb} MB |")
+                  lines.append(f"| **Parts** | {len(parts)} |")
+                  lines.append(f"| **Source** | [Telegram Link]({telegram_link}) |")
+              else:
+                  lines.append("| Property | Value |")
+                  lines.append("|----------|-------|")
+                  lines.append(f"| **Status** | ❌ Failed |")
+                  lines.append(f"| **Original Name** | `{original_name}` |")
+                  lines.append(f"| **Source** | [Telegram Link]({telegram_link}) |")
+                  lines.append("")
+                  lines.append("> ⚠️ This file could not be downloaded. Please try again or download manually from the source link.")
+
+              lines.append("\n---\n")
+
+              # Download links section (only for successful downloads)
+              if status == 'success' and parts:
+                  lines.append("## 📥 Download Links\n")
+
+                  if len(parts) > 1:
+                      lines.append(f"This file has been split into **{len(parts)} parts** due to size limitations.\n")
+                      lines.append("| # | File | Size | Download |")
+                      lines.append("|---|------|------|----------|")
+                      for i, part in enumerate(parts, 1):
+                          part_name = part['name']
+                          part_size = part['size_mb']
+                          encoded = quote(part_name, safe='')
+                          url = f"{raw_base}/{encoded}"
+                          lines.append(f"| {i} | `{part_name}` | {part_size} MB | [⬇️ Download]({url}) |")
+                      lines.append("")
+                      lines.append("### 📋 How to Extract\n")
+                      lines.append("1. Download all parts above")
+                      lines.append("2. Extract each ZIP file using any ZIP tool (WinRAR, 7-Zip, File Explorer, Ark)")
+                      lines.append("3. Combine the extracted parts: `cat *_part* > original_file`")
+                  else:
+                      part = parts[0]
+                      part_name = part['name']
+                      part_size = part['size_mb']
+                      encoded = quote(part_name, safe='')
+                      url = f"{raw_base}/{encoded}"
+
+                      lines.append(f"| File | Size | Download |")
+                      lines.append(f"|------|------|----------|")
+                      lines.append(f"| `{part_name}` | {part_size} MB | [⬇️ Download]({url}) |")
+                      lines.append("")
+                      if part_name.endswith('.zip'):
+                          lines.append("### 📋 How to Extract\n")
+                          lines.append("Simply right-click the ZIP file and extract using any tool:")
+                          lines.append("- **Windows**: Right-click → Extract All, or use WinRAR/7-Zip")
+                          lines.append("- **macOS**: Double-click the ZIP file")
+                          lines.append("- **Linux**: Right-click → Extract Here, or use `unzip` command")
+
+              lines.append("\n---\n")
+              lines.append(f"*Generated by GitHub Actions Telegram Downloader*")
+
+              # Write README.md for this folder
+              readme_path = os.path.join(folder_path, 'README.md')
+              with open(readme_path, 'w', encoding='utf-8') as f:
+                  f.write("\n".join(lines))
+
+              print(f"✅ Created README.md for: {folder_name}")
+
+          print(f"\n{'='*60}")
+          print(f"📝 Generated {len(packaged_files)} folder README files")
+          PYEOF
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+
+      - name: 📝 Generate main downloads README.md
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+          from datetime import datetime
+          from urllib.parse import quote
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          branch = os.environ['GITHUB_REF_NAME']
+
+          # Ensure downloads folder exists
+          os.makedirs('downloads', exist_ok=True)
+
+          with open('/tmp/packaged_files.json', 'r') as f:
+              packaged_files = json.load(f)
+
+          # Load failed links if any
+          failed_links = []
+          try:
+              with open('/tmp/failed_links.json', 'r') as f:
+                  failed_links = json.load(f)
+          except:
+              pass
+
+          today = datetime.now().strftime('%Y-%m-%d')
+          time_now = datetime.now().strftime('%H:%M:%S')
+
+          # Separate successful and failed downloads
+          successful = [f for f in packaged_files if f.get('status', 'success') == 'success']
+          failed = [f for f in packaged_files if f.get('status') == 'failed']
+
+          lines = []
+          lines.append("# 📥 Downloaded Telegram Files\n")
+          lines.append(f"**Last Updated:** {today} at {time_now}\n")
+          lines.append("---\n")
+
+          # Summary
+          total_files = len(successful)
+          total_failed = len(failed) + len(failed_links)
+          total_size = sum(f['size_mb'] for f in successful)
+
+          lines.append("## 📊 Summary\n")
+          lines.append("| Metric | Value |")
+          lines.append("|--------|-------|")
+          lines.append(f"| **Total Files** | {total_files} |")
+          lines.append(f"| **Total Size** | {total_size:.2f} MB |")
+          if total_failed > 0:
+              lines.append(f"| **Failed** | {total_failed} |")
+          lines.append("\n---\n")
+
+          # File listings - Successful
+          if successful:
+              lines.append("## ✅ Downloaded Files\n")
+              lines.append("| # | File | Size | Folder |")
+              lines.append("|---|------|------|--------|")
+
+              for idx, file_info in enumerate(successful, 1):
+                  original_name = file_info['original_name']
+                  folder_name = file_info['folder_name']
+                  size_mb = file_info['size_mb']
+
+                  # Link to folder README
+                  folder_link = f"./{quote(folder_name, safe='')}"
+
+                  lines.append(f"| {idx} | {original_name} | {size_mb} MB | [📁 {folder_name}]({folder_link}) |")
+
+              lines.append("\n---\n")
+
+          # File listings - Failed
+          if failed or failed_links:
+              lines.append("## ❌ Failed Downloads\n")
+
+              if failed:
+                  lines.append("| # | File | Source |")
+                  lines.append("|---|------|--------|")
+                  for idx, file_info in enumerate(failed, 1):
+                      original_name = file_info['original_name']
+                      telegram_link = file_info['telegram_link']
+                      lines.append(f"| {idx} | {original_name} | [Telegram]({telegram_link}) |")
+                  lines.append("")
+
+              if failed_links:
+                  lines.append("**Could not resolve these links:**\n")
+                  for link in failed_links:
+                      lines.append(f"- `{link[:80]}...`")
+
+              lines.append("\n---\n")
+
+          # How to use section
+          lines.append("## 📋 How to Use\n")
+          lines.append("1. Click on any folder link above to see the file details")
+          lines.append("2. Each folder contains a `README.md` with download links and extraction instructions")
+          lines.append("3. Download the file(s) and extract using any ZIP tool\n")
+          lines.append("### Supported Extraction Tools\n")
+          lines.append("- **Windows**: File Explorer (built-in), WinRAR, 7-Zip")
+          lines.append("- **macOS**: Archive Utility (built-in), The Unarchiver")
+          lines.append("- **Linux**: File Manager (built-in), Ark, `unzip` command\n")
+          lines.append("---\n")
+          lines.append("*Generated by GitHub Actions Telegram Downloader*")
+
+          content = "\n".join(lines)
+
+          # Write main README.md in downloads folder
+          readme_path = os.path.join('downloads', 'README.md')
+          with open(readme_path, 'w', encoding='utf-8') as f:
+              f.write(content)
+
+          print("✅ Main downloads/README.md generated successfully!")
+          print(f"\n{'='*60}")
+          print("📄 README.md Preview:")
+          print(f"{'='*60}")
+          print(content[:1500])
+          if len(content) > 1500:
+              print("\n... (truncated)")
+          PYEOF
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+
       - name: 📝 Generate Links.md
         run: |
           python3 << 'PYEOF'
@@ -580,8 +841,14 @@ jobs:
           repo = os.environ['GITHUB_REPOSITORY']
           branch = os.environ['GITHUB_REF_NAME']
 
+          # Ensure downloads folder exists
+          os.makedirs('downloads', exist_ok=True)
+
           with open('/tmp/packaged_files.json', 'r') as f:
               packaged_files = json.load(f)
+
+          # Filter only successful downloads for Links.md
+          packaged_files = [f for f in packaged_files if f.get('status', 'success') == 'success']
 
           # Load failed links if any
           failed_links = []
@@ -633,6 +900,7 @@ jobs:
               lines.append(f"### {idx}. {original_name}\n")
               lines.append(f"| Property | Value |")
               lines.append(f"|----------|-------|")
+              lines.append(f"| **Status** | ✅ 100% Downloaded |")
               lines.append(f"| **Source** | [Telegram Link]({telegram_link}) |")
               lines.append(f"| **Folder** | `{folder_name}` |")
               lines.append(f"| **Size** | {size_mb} MB |")
@@ -774,6 +1042,7 @@ jobs:
 
           echo "│ 📁 Location   : ./downloads/<folder_name>/"
           echo "│ 📄 Links      : ./Links.md"
+          echo "│ 📄 Index      : ./downloads/README.md"
           echo "│ 📦 Format     : Standard ZIP (compatible with all tools)"
 
           if [ -n "${{ github.event.inputs.password }}" ]; then
