@@ -1,0 +1,1 @@
+در این آلبوم تصویری بخش های پرکاربرد نرم افزار Stacer در لینوکس را مشاهده میکنید.بخش های اضافه شده شامل :1 - Startup Apps2 - System Cleaner3 - Services4 - Processes5 - Uninstaller6 - Resources7 - APT - Repository Managerـ
