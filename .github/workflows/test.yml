@@ -42,7 +42,7 @@ jobs:
       - name: 🔧 Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y curl jq openssl bc p7zip-full python3 aria2
+          sudo apt-get install -y curl jq openssl bc zip unzip python3 aria2
 
           echo "✅ Dependencies installed"
           echo ""
@@ -51,7 +51,7 @@ jobs:
           wget --version | head -1
           aria2c --version | head -1
           jq --version
-          7z i 2>/dev/null | head -2
+          zip --version | head -2
 
       - name: 📋 Parse & Resolve Multiple Links
         id: resolve
@@ -218,7 +218,7 @@ jobs:
         id: download
         run: |
           python3 << 'PYEOF'
-          import json, os, subprocess, sys, re, hashlib
+          import json, os, subprocess, sys, re, hashlib, glob
 
           def sanitize_name(filename):
               """Sanitize filename for safe filesystem use"""
@@ -238,6 +238,21 @@ jobs:
                       safe_base = hashlib.md5(filename.encode('utf-8')).hexdigest()[:12]
 
               return f"{safe_base}{ext.lower()}"
+
+          def get_unique_folder_name(base_path, folder_name):
+              """Get a unique folder name, adding suffix if folder exists"""
+              folder_path = os.path.join(base_path, folder_name)
+              if not os.path.exists(folder_path):
+                  return folder_name
+
+              # Folder exists, add suffix
+              counter = 1
+              while True:
+                  new_name = f"{folder_name}_copy{counter}"
+                  new_path = os.path.join(base_path, new_name)
+                  if not os.path.exists(new_path):
+                      return new_name
+                  counter += 1
 
           def download_file(url, output_path):
               """Try multiple download methods"""
@@ -288,6 +303,12 @@ jobs:
 
                       result = method()
 
+                      # Clean up .aria2 metadata files
+                      aria2_file = output_path + '.aria2'
+                      if os.path.exists(aria2_file):
+                          os.remove(aria2_file)
+                          print(f"    🧹 Cleaned up .aria2 metadata file")
+
                       if os.path.exists(output_path):
                           size = os.path.getsize(output_path)
                           if size > 1024:
@@ -320,29 +341,36 @@ jobs:
 
               safe_name = sanitize_name(original_name)
 
+              # Create folder name from filename (without extension)
+              folder_base_name = os.path.splitext(safe_name)[0]
+
+              # Get unique folder name (add suffix if folder exists)
+              folder_name = get_unique_folder_name('downloads', folder_base_name)
+              folder_path = os.path.join('downloads', folder_name)
+              os.makedirs(folder_path, exist_ok=True)
+
               print(f"\n{'='*60}")
               print(f"⬇️ [{idx}/{len(downloads)}] Downloading: {original_name}")
               print(f"📄 Safe name: {safe_name}")
+              print(f"📁 Folder: {folder_name}")
               print(f"🔗 From: {telegram_link[:60]}...")
               print(f"{'='*60}")
 
-              # Handle duplicates
-              final_name = safe_name
-              counter = 1
-              while os.path.exists(os.path.join('downloads', final_name)):
-                  base, ext = os.path.splitext(safe_name)
-                  final_name = f"{base}_{counter}{ext}"
-                  counter += 1
-
-              output_path = os.path.join('downloads', final_name)
+              output_path = os.path.join(folder_path, safe_name)
 
               if download_file(url, output_path):
+                  # Clean up any remaining .aria2 files in the folder
+                  for aria2_file in glob.glob(os.path.join(folder_path, '*.aria2')):
+                      os.remove(aria2_file)
+                      print(f"🧹 Cleaned up: {os.path.basename(aria2_file)}")
+
                   size = os.path.getsize(output_path)
                   size_mb = size / (1024 * 1024)
-                  print(f"✅ Downloaded: {final_name} ({size_mb:.2f} MB)")
+                  print(f"✅ Downloaded: {folder_name}/{safe_name} ({size_mb:.2f} MB)")
 
                   downloaded_files.append({
-                      'filename': final_name,
+                      'filename': safe_name,
+                      'folder_name': folder_name,
                       'original_name': original_name,
                       'telegram_link': telegram_link,
                       'size_bytes': size,
@@ -350,10 +378,18 @@ jobs:
                   })
               else:
                   print(f"❌ All download methods failed for: {original_name}")
+                  # Remove empty folder if download failed
+                  if os.path.exists(folder_path) and not os.listdir(folder_path):
+                      os.rmdir(folder_path)
                   failed_downloads.append({
                       'original_name': original_name,
                       'telegram_link': telegram_link
                   })
+
+          # Final cleanup: remove any .aria2 files that might have been left behind
+          for aria2_file in glob.glob('downloads/**/*.aria2', recursive=True):
+              os.remove(aria2_file)
+              print(f"🧹 Final cleanup: {aria2_file}")
 
           # Save results
           with open('/tmp/downloaded_files.json', 'w') as f:
@@ -377,13 +413,15 @@ jobs:
               sys.exit(1)
           PYEOF
 
-      - name: 📦 Package Files (Split if needed)
+      - name: 📦 Package Files as Standard ZIP
         id: package
         run: |
           python3 << 'PYEOF'
-          import os, subprocess, json, glob
+          import os, subprocess, json, glob, shutil
 
           ZIP_PASSWORD = """${{ github.event.inputs.password }}"""
+          # GitHub has a 100MB file size limit, use 95MB to be safe
+          MAX_ZIP_SIZE_MB = 95
 
           with open('/tmp/downloaded_files.json', 'r') as f:
               downloaded_files = json.load(f)
@@ -396,7 +434,9 @@ jobs:
 
           for file_info in downloaded_files:
               filename = file_info['filename']
-              filepath = os.path.join('downloads', filename)
+              folder_name = file_info['folder_name']
+              folder_path = os.path.join('downloads', folder_name)
+              filepath = os.path.join(folder_path, filename)
 
               if not os.path.exists(filepath):
                   continue
@@ -407,74 +447,110 @@ jobs:
               entry = {
                   'original_name': file_info['original_name'],
                   'telegram_link': file_info['telegram_link'],
+                  'folder_name': folder_name,
                   'size_mb': round(size_mb, 2),
                   'parts': []
               }
 
-              # Determine split threshold based on file size
-              if size_mb < 45:
-                  split_mb = 0
-              elif size_mb < 500:
-                  split_mb = 45
-              elif size_mb < 2048:
-                  split_mb = 90
-              else:
-                  split_mb = 190
-
-              split_bytes = split_mb * 1024 * 1024
-
               print(f"\n{'='*60}")
-              print(f"📦 Processing: {filename} ({size_mb:.2f} MB)")
+              print(f"📦 Processing: {folder_name}/{filename} ({size_mb:.2f} MB)")
 
-              # Case A: Large file needs splitting
-              if split_mb > 0 and size > split_bytes:
-                  print(f"✂️ Splitting into {split_mb}MB parts...")
+              base_name = os.path.splitext(filename)[0]
 
-                  base_name = os.path.splitext(filename)[0]
-                  archive_path = os.path.join('downloads', f'{base_name}.7z')
+              # Case A: Large file needs splitting into multiple ZIPs
+              if size_mb > MAX_ZIP_SIZE_MB:
+                  print(f"✂️ File is larger than {MAX_ZIP_SIZE_MB}MB, splitting into multiple ZIP files...")
 
-                  cmd = ['7z', 'a', f'-v{split_mb}m', '-mx=0']
-                  if ZIP_PASSWORD:
-                      cmd.extend([f'-p{ZIP_PASSWORD}', '-mhe=on'])
-                  cmd.extend([archive_path, filepath])
+                  # Calculate number of parts needed
+                  split_size_bytes = MAX_ZIP_SIZE_MB * 1024 * 1024
+                  num_parts = int(size / split_size_bytes) + 1
 
-                  result = subprocess.run(cmd, capture_output=True, text=True)
+                  # Split the file first
+                  print(f"📄 Splitting file into {num_parts} parts...")
+                  split_prefix = os.path.join(folder_path, f'{base_name}_part_')
+                  result = subprocess.run([
+                      'split', '-b', f'{MAX_ZIP_SIZE_MB}m', '-d', '--suffix-length=3',
+                      filepath, split_prefix
+                  ], capture_output=True, text=True)
 
                   if result.returncode == 0:
+                      # Remove original file
                       os.remove(filepath)
-                      parts = sorted(glob.glob(os.path.join('downloads', f'{base_name}.7z.*')))
-                      print(f"✅ Created {len(parts)} parts")
-                      for part in parts:
-                          part_size = os.path.getsize(part) / (1024 * 1024)
-                          entry['parts'].append({
-                              'name': os.path.basename(part),
-                              'size_mb': round(part_size, 2)
-                          })
+
+                      # Create ZIP for each part
+                      part_files = sorted(glob.glob(f'{split_prefix}*'))
+                      for i, part_file in enumerate(part_files, 1):
+                          part_basename = os.path.basename(part_file)
+                          zip_name = f'{base_name}_part{i:03d}.zip'
+                          zip_path = os.path.join(folder_path, zip_name)
+
+                          # Create ZIP (with or without password)
+                          if ZIP_PASSWORD:
+                              cmd = ['zip', '-j', '-P', ZIP_PASSWORD, zip_path, part_file]
+                          else:
+                              cmd = ['zip', '-j', zip_path, part_file]
+
+                          subprocess.run(cmd, capture_output=True)
+
+                          # Remove the split part file
+                          os.remove(part_file)
+
+                          if os.path.exists(zip_path):
+                              zip_size = os.path.getsize(zip_path) / (1024 * 1024)
+                              entry['parts'].append({
+                                  'name': zip_name,
+                                  'size_mb': round(zip_size, 2)
+                              })
+                              print(f"  ✅ Created: {zip_name} ({zip_size:.2f} MB)")
+
+                      print(f"✅ Created {len(entry['parts'])} ZIP parts")
+                      print(f"💡 To extract: Unzip all parts in order, then combine with: cat {base_name}_part* > {filename}")
                   else:
-                      print(f"⚠️ Split failed, keeping original")
+                      print(f"⚠️ Split failed, keeping original file")
                       entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
 
-              # Case B: Small file but password requested
+              # Case B: File fits in single ZIP with password
               elif ZIP_PASSWORD:
-                  print(f"🔐 Creating password-protected archive...")
-                  base_name = os.path.splitext(filename)[0]
-                  archive_path = os.path.join('downloads', f'{base_name}.7z')
+                  print(f"🔐 Creating password-protected ZIP...")
+                  zip_name = f'{base_name}.zip'
+                  zip_path = os.path.join(folder_path, zip_name)
 
-                  cmd = ['7z', 'a', f'-p{ZIP_PASSWORD}', '-mhe=on', '-mx=0', archive_path, filepath]
+                  cmd = ['zip', '-j', '-P', ZIP_PASSWORD, zip_path, filepath]
                   result = subprocess.run(cmd, capture_output=True, text=True)
 
                   if result.returncode == 0:
                       os.remove(filepath)
-                      arc_size = os.path.getsize(archive_path) / (1024 * 1024)
-                      entry['parts'].append({'name': f'{base_name}.7z', 'size_mb': round(arc_size, 2)})
-                      print(f"✅ Archive created")
+                      zip_size = os.path.getsize(zip_path) / (1024 * 1024)
+                      entry['parts'].append({'name': zip_name, 'size_mb': round(zip_size, 2)})
+                      print(f"✅ Created: {zip_name} ({zip_size:.2f} MB)")
                   else:
+                      print(f"⚠️ ZIP failed, keeping original")
                       entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
 
-              # Case C: Small file, no password
+              # Case C: Small file, no password - keep as-is or create simple ZIP
               else:
-                  print(f"📄 Keeping as-is (under threshold)")
-                  entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
+                  # Check if file is already a common archive format
+                  ext = os.path.splitext(filename)[1].lower()
+                  if ext in ['.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2']:
+                      print(f"📄 File is already an archive, keeping as-is")
+                      entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
+                  else:
+                      # Create a simple ZIP for easy extraction
+                      print(f"📦 Creating standard ZIP archive...")
+                      zip_name = f'{base_name}.zip'
+                      zip_path = os.path.join(folder_path, zip_name)
+
+                      cmd = ['zip', '-j', zip_path, filepath]
+                      result = subprocess.run(cmd, capture_output=True, text=True)
+
+                      if result.returncode == 0:
+                          os.remove(filepath)
+                          zip_size = os.path.getsize(zip_path) / (1024 * 1024)
+                          entry['parts'].append({'name': zip_name, 'size_mb': round(zip_size, 2)})
+                          print(f"✅ Created: {zip_name} ({zip_size:.2f} MB)")
+                      else:
+                          print(f"⚠️ ZIP failed, keeping original")
+                          entry['parts'].append({'name': filename, 'size_mb': round(size_mb, 2)})
 
               packaged_files.append(entry)
 
@@ -482,12 +558,16 @@ jobs:
               json.dump(packaged_files, f)
 
           print(f"\n{'='*60}")
-          print(f"📂 Final files in downloads/:")
-          for f in sorted(os.listdir('downloads')):
-              fpath = os.path.join('downloads', f)
-              if os.path.isfile(fpath):
-                  fsize = os.path.getsize(fpath) / (1024 * 1024)
-                  print(f"  • {f} ({fsize:.2f} MB)")
+          print(f"📂 Final structure in downloads/:")
+          for folder in sorted(os.listdir('downloads')):
+              folder_path = os.path.join('downloads', folder)
+              if os.path.isdir(folder_path):
+                  print(f"  📁 {folder}/")
+                  for f in sorted(os.listdir(folder_path)):
+                      fpath = os.path.join(folder_path, f)
+                      if os.path.isfile(fpath):
+                          fsize = os.path.getsize(fpath) / (1024 * 1024)
+                          print(f"      • {f} ({fsize:.2f} MB)")
           PYEOF
 
       - name: 📝 Generate Links.md
@@ -499,7 +579,6 @@ jobs:
 
           repo = os.environ['GITHUB_REPOSITORY']
           branch = os.environ['GITHUB_REF_NAME']
-          raw_base = f"https://github.com/{repo}/raw/refs/heads/{branch}/downloads"
 
           with open('/tmp/packaged_files.json', 'r') as f:
               packaged_files = json.load(f)
@@ -545,13 +624,17 @@ jobs:
           for idx, file_info in enumerate(packaged_files, 1):
               original_name = file_info['original_name']
               telegram_link = file_info['telegram_link']
+              folder_name = file_info['folder_name']
               size_mb = file_info['size_mb']
               parts = file_info['parts']
+
+              raw_base = f"https://github.com/{repo}/raw/refs/heads/{branch}/downloads/{quote(folder_name, safe='')}"
 
               lines.append(f"### {idx}. {original_name}\n")
               lines.append(f"| Property | Value |")
               lines.append(f"|----------|-------|")
               lines.append(f"| **Source** | [Telegram Link]({telegram_link}) |")
+              lines.append(f"| **Folder** | `{folder_name}` |")
               lines.append(f"| **Size** | {size_mb} MB |")
               lines.append(f"| **Parts** | {len(parts)} |")
               lines.append("")
@@ -567,7 +650,7 @@ jobs:
                       url = f"{raw_base}/{encoded}"
                       lines.append(f"| {i} | `{part_name}` | {part_size} MB | [⬇️ Download]({url}) |")
                   lines.append("")
-                  lines.append("> 💡 **To extract:** Download all parts, then right-click `.7z.001` → Extract with [7-Zip](https://www.7-zip.org/)\n")
+                  lines.append("> 💡 **To extract:** Download all ZIP parts. Each part can be extracted individually with any ZIP tool (WinRAR, 7-Zip, File Explorer, Ark, etc.)\n")
               else:
                   part = parts[0]
                   part_name = part['name']
@@ -575,6 +658,8 @@ jobs:
                   encoded = quote(part_name, safe='')
                   url = f"{raw_base}/{encoded}"
                   lines.append(f"**📥 Download:** [**{part_name}**]({url}) ({part_size} MB)\n")
+                  if part_name.endswith('.zip'):
+                      lines.append("> 💡 **To extract:** Simply right-click and extract with any ZIP tool (WinRAR, 7-Zip, File Explorer, Ark, etc.)\n")
 
               lines.append("---\n")
 
@@ -687,8 +772,9 @@ jobs:
             fi
           fi
 
-          echo "│ 📁 Location   : ./downloads/"
+          echo "│ 📁 Location   : ./downloads/<folder_name>/"
           echo "│ 📄 Links      : ./Links.md"
+          echo "│ 📦 Format     : Standard ZIP (compatible with all tools)"
 
           if [ -n "${{ github.event.inputs.password }}" ]; then
             echo "│ 🔐 Archive    : Password-protected"
@@ -699,5 +785,5 @@ jobs:
           if [ -d "downloads" ]; then
             echo ""
             echo "📂 Downloaded files:"
-            ls -lh downloads/ 2>/dev/null | tail -n +2 || echo "  (empty)"
+            find downloads -type f -exec ls -lh {} \; 2>/dev/null | head -20 || echo "  (empty)"
           fi
